@@ -64,7 +64,7 @@ class GameEngine:
             # Check if we have enough players
             active_players = [p for p in self.players if p.chips > 0]
             if len(active_players) < 2:
-                logger.info("Not enough players with chips to continue.")
+                # logger.info("Not enough players with chips to continue.")
                 break
             
             self._play_hand()

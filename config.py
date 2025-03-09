@@ -52,7 +52,7 @@ class PokerConfig:
     # - Game phase (5 one-hot encoded phases = 5)
     # - Number of players still in hand (1)
     # - Position relative to dealer (1)
-    STATE_SIZE = 400
+    STATE_SIZE = 50
     
     # Neural network output size (possible actions)
     ACTION_SIZE = len(Action)
