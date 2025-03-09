@@ -53,6 +53,8 @@ class GameEngine:
         Returns:
             Dict[str, int]: Mapping of player names to final chip counts
         """
+        eliminated_players = set()
+        
         for hand_num in range(num_hands):
             if self.verbose:
                 print(f"\n{'='*50}")
@@ -67,12 +69,13 @@ class GameEngine:
             
             self._play_hand()
             
-            # Rotate dealer position
-            self.dealer_position = (self.dealer_position + 1) % len(self.players)
+            # Rotate dealer position (making sure we land on a player with chips)
+            self.dealer_position = self._find_next_active_position(self.dealer_position - 1)
             
             # Check for eliminated players
             for player in self.players:
-                if player.chips <= 0:
+                if player.chips <= 0 and player.name not in eliminated_players:
+                    eliminated_players.add(player.name)
                     if self.verbose:
                         print(f"{player.name} has been eliminated!")
         
@@ -118,7 +121,7 @@ class GameEngine:
         if self._count_active_players() >= 2:
             self.phase = GamePhase.SHOWDOWN
             self._showdown()
-    
+        
     def _setup_hand(self):
         """Set up for a new hand."""
         # Reset deck and community cards
@@ -134,9 +137,21 @@ class GameEngine:
         for player in self.players:
             player.reset_for_new_hand()
         
-        # Determine blind positions
-        self.small_blind_position = (self.dealer_position + 1) % len(self.players)
-        self.big_blind_position = (self.dealer_position + 2) % len(self.players)
+        # Get a list of active players with chips
+        active_players = [p for p in self.players if p.chips > 0]
+        
+        # Handle the case where there are too few active players
+        if len(active_players) < 2:
+            logger.warning("Not enough players with chips to play a hand.")
+            return False  # Signal that hand setup failed
+        
+        # Determine blind positions (ensuring players have chips)
+        small_blind_pos = self._find_next_active_position(self.dealer_position)
+        big_blind_pos = self._find_next_active_position(small_blind_pos)
+        
+        # Update the actual positions
+        self.small_blind_position = small_blind_pos
+        self.big_blind_position = big_blind_pos
         
         # Post blinds
         small_blind_player = self.players[self.small_blind_position]
@@ -153,19 +168,84 @@ class GameEngine:
         
         # Deal hole cards
         for _ in range(2):
-            for player in self.players:
-                if player.chips > 0:  # Only deal to players with chips
-                    player.receive_card(self.deck.deal())
+            for player in active_players:
+                player.receive_card(self.deck.deal())
         
         # Set starting player position (after big blind)
-        self.current_player_index = (self.big_blind_position + 1) % len(self.players)
+        self.current_player_index = self._find_next_active_position(self.big_blind_position)
         
         if self.verbose:
             print("\nBlinds posted:")
             print(f"{small_blind_player.name} posts small blind: {small_blind_amount}")
             print(f"{big_blind_player.name} posts big blind: {big_blind_amount}")
             print(f"Pot: {self.pot}")
+            
+        return True  # Signal successful hand setup
+
+    def _find_next_active_position(self, start_pos: int) -> int:
+        """
+        Find the next position with a player who has chips.
+        
+        Args:
+            start_pos (int): Starting position
+            
+        Returns:
+            int: Next active player position
+        """
+        position = (start_pos + 1) % len(self.players)
+        
+        # Search until we find a player with chips
+        while position != start_pos:
+            if self.players[position].chips > 0:
+                return position
+            position = (position + 1) % len(self.players)
+        
+        # If we've gone full circle, return the start position
+        # This shouldn't happen if we check for enough active players earlier
+        return start_pos
     
+    def _play_hand(self):
+        """Play a single hand of poker."""
+        # Setup the hand and check if we can proceed
+        if not self._setup_hand():
+            return  # Not enough active players to play
+        
+        # Pre-flop betting round
+        self.phase = GamePhase.PREFLOP
+        if self.verbose:
+            print(f"\n--- Pre-flop ---")
+        self._betting_round()
+        
+        # Continue if at least 2 players are still active
+        if self._count_active_players() >= 2:
+            # Deal the flop
+            self._deal_community_cards(3)
+            self.phase = GamePhase.FLOP
+            if self.verbose:
+                print(f"\n--- Flop: {' '.join(str(card) for card in self.community_cards)} ---")
+            self._betting_round()
+        
+        if self._count_active_players() >= 2:
+            # Deal the turn
+            self._deal_community_cards(1)
+            self.phase = GamePhase.TURN
+            if self.verbose:
+                print(f"\n--- Turn: {' '.join(str(card) for card in self.community_cards)} ---")
+            self._betting_round()
+        
+        if self._count_active_players() >= 2:
+            # Deal the river
+            self._deal_community_cards(1)
+            self.phase = GamePhase.RIVER
+            if self.verbose:
+                print(f"\n--- River: {' '.join(str(card) for card in self.community_cards)} ---")
+            self._betting_round()
+        
+        # Showdown if at least 2 players are still active
+        if self._count_active_players() >= 2:
+            self.phase = GamePhase.SHOWDOWN
+            self._showdown()
+
     def _deal_community_cards(self, count: int):
         """
         Deal community cards.
@@ -178,45 +258,38 @@ class GameEngine:
     
     def _betting_round(self):
         """Execute a betting round."""
-        # Reset current bet for this round
-        players_to_act = [p for p in self.players if p.is_active and not p.is_all_in]
+        # Get active players who can participate (have chips and haven't folded)
+        players_to_act = [p for p in self.players if p.is_active and p.chips > 0]
         if not players_to_act:
             return
         
         # In pre-flop, we start after the big blind
         if self.phase == GamePhase.PREFLOP:
-            start_idx = (self.big_blind_position + 1) % len(self.players)
+            start_idx = self._find_next_active_position(self.big_blind_position)
         else:
             # In other rounds, we start after the dealer
-            start_idx = (self.dealer_position + 1) % len(self.players)
-        
-        # Adjust if the starting player is not active
-        while start_idx != self.current_player_index and (
-            not self.players[start_idx].is_active or 
-            self.players[start_idx].is_all_in
-        ):
-            start_idx = (start_idx + 1) % len(self.players)
+            start_idx = self._find_next_active_position(self.dealer_position)
         
         self.current_player_index = start_idx
         
         # For tracking when the betting round is complete
         players_acted = 0
-        max_players = len(self.players)
+        max_players = len(players_to_act)  # Only count players who can act
         last_raiser = None
         
         # Continue betting until everyone has called, folded, or gone all-in
         while players_acted < max_players:
             current_player = self.players[self.current_player_index]
             
-            # Skip players who are not active or are all-in
-            if not current_player.is_active or current_player.is_all_in:
-                self.current_player_index = (self.current_player_index + 1) % len(self.players)
+            # Skip players who are not active, are all-in, or have 0 chips
+            if not current_player.is_active or current_player.is_all_in or current_player.chips <= 0:
+                self.current_player_index = self._find_next_active_position(self.current_player_index - 1)
                 players_acted += 1
                 continue
             
             # If everyone has acted and all active players have called or checked
             if players_acted >= max_players and (last_raiser is None or 
-                  self.current_player_index == last_raiser):
+                self.current_player_index == last_raiser):
                 break
             
             # Get the amount the player needs to call
@@ -297,9 +370,13 @@ class GameEngine:
                 if self.verbose:
                     print(f"{current_player.name} folds (timeout)")
             
-            # Move to the next player
-            self.current_player_index = (self.current_player_index + 1) % len(self.players)
+            # Move to the next player with chips
+            self.current_player_index = self._find_next_active_position(self.current_player_index)
             players_acted += 1
+        
+        # Reset bets for the next round
+        for player in self.players:
+            player.reset_for_new_round()
         
     def _get_valid_actions(self, player: Player, to_call: int) -> List[Action]:
         """
