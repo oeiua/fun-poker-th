@@ -695,28 +695,33 @@ class PokerTHProtobufClient:
         Handle join game reply message.
         
         Args:
-            reply: Join game reply message
+            reply: JoinGameAckMessage object
         """
         try:
-            if reply.result == pokerth_pb2.JoinGameReplyMessage.JoinGameResult.JOIN_GAME_RESULT_SUCCESS:
-                self.game_id = reply.game_id
-                self.joined_game = True
-                logger.info(f"Successfully joined game {reply.game_id}")
-            else:
-                error_msg = self._get_join_game_error_message(reply.result)
-                logger.error(f"Failed to join game: {error_msg}")
+            # JoinGameAckMessage doesn't have a result field, it means we successfully joined
+            self.game_id = reply.gameId
+            self.joined_game = True
+            
+            # Check if we're the admin
+            is_admin = reply.areYouGameAdmin
+            
+            logger.info(f"Successfully joined game {reply.gameId}" + 
+                        (" as admin" if is_admin else ""))
+            
+            # Store game info
+            if reply.HasField("gameInfo"):
+                game_info = reply.gameInfo
+                logger.info(f"Game name: {game_info.gameName}")
+                logger.info(f"Max players: {game_info.maxNumPlayers}")
+                logger.info(f"Initial chips: {game_info.startMoney}")
                 
-                # If we failed to join, create our own game
-                if self.game_name:
-                    logger.info(f"Creating game '{self.game_name}' instead")
-                    self._send_create_game_request(self.game_name)
-                else:
-                    default_name = f"{self.username}'s Game"
-                    logger.info(f"Creating game '{default_name}' instead")
-                    self._send_create_game_request(default_name)
+                # Update our chips
+                self.my_chips = game_info.startMoney
         
         except Exception as e:
             logger.error(f"Error handling join game reply: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
     
     def _handle_create_game_reply(self, reply):
         """
@@ -974,7 +979,41 @@ class PokerTHProtobufClient:
         
         except Exception as e:
             logger.error(f"Error handling game player message: {e}")
-    
+
+    def _handle_game_player_joined(self, message):
+        """
+        Handle game player joined message.
+        
+        Args:
+            message: GamePlayerJoinedMessage object
+        """
+        try:
+            game_id = message.gameId
+            player_id = message.playerId
+            is_admin = message.isGameAdmin
+            
+            # Update player states if this is our game
+            if game_id == self.game_id:
+                # Add player to our tracking
+                if player_id not in self.player_states:
+                    self.player_states[player_id] = {
+                        'name': f"Player {player_id}",  # Will be updated when we get player info
+                        'active': True,
+                        'chips': 0,
+                        'bet': 0
+                    }
+                
+                # Update active players count
+                self.active_players = len(self.player_states)
+                
+                logger.info(f"Player {player_id} joined the game" + 
+                            (" as admin" if is_admin else ""))
+        
+        except Exception as e:
+            logger.error(f"Error handling player joined: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
     def _handle_error(self, error_message):
         """
         Handle error message.
@@ -1247,7 +1286,213 @@ class PokerTHProtobufClient:
         }
         
         return error_messages.get(error_code, f"Unknown error ({error_code})")
-    
+
+    def _handle_join_game_failed(self, message):
+        """
+        Handle join game failed message.
+        
+        Args:
+            message: JoinGameFailedMessage object
+        """
+        try:
+            game_id = message.gameId
+            reason = message.joinGameFailureReason
+            
+            # Map the error code to a human-readable message
+            reasons = {
+                pokerth_pb2.JoinGameFailedMessage.JoinGameFailureReason.invalidGame: "Invalid game",
+                pokerth_pb2.JoinGameFailedMessage.JoinGameFailureReason.gameIsFull: "Game is full",
+                pokerth_pb2.JoinGameFailedMessage.JoinGameFailureReason.gameIsRunning: "Game is already running",
+                pokerth_pb2.JoinGameFailedMessage.JoinGameFailureReason.invalidPassword: "Invalid password",
+                pokerth_pb2.JoinGameFailedMessage.JoinGameFailureReason.notAllowedAsGuest: "Not allowed as guest",
+                pokerth_pb2.JoinGameFailedMessage.JoinGameFailureReason.notInvited: "Not invited to this game",
+                pokerth_pb2.JoinGameFailedMessage.JoinGameFailureReason.gameNameInUse: "Game name already in use",
+                pokerth_pb2.JoinGameFailedMessage.JoinGameFailureReason.badGameName: "Bad game name",
+                pokerth_pb2.JoinGameFailedMessage.JoinGameFailureReason.invalidSettings: "Invalid game settings",
+                pokerth_pb2.JoinGameFailedMessage.JoinGameFailureReason.ipAddressBlocked: "IP address blocked",
+                pokerth_pb2.JoinGameFailedMessage.JoinGameFailureReason.rejoinFailed: "Rejoin failed",
+                pokerth_pb2.JoinGameFailedMessage.JoinGameFailureReason.noSpectatorsAllowed: "No spectators allowed"
+            }
+            error_message = reasons.get(reason, f"Unknown reason: {reason}")
+            
+            logger.error(f"Failed to join game {game_id}: {error_message}")
+            
+            # If we failed to join, try creating our own game
+            if self.game_name:
+                logger.info(f"Creating game '{self.game_name}' instead")
+                self._send_create_game_request(self.game_name)
+            else:
+                default_name = f"{self.username}'s Game"
+                logger.info(f"Creating game '{default_name}' instead")
+                self._send_create_game_request(default_name)
+        
+        except Exception as e:
+            logger.error(f"Error handling join game failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+    def _handle_hand_start(self, message):
+        """
+        Handle hand start message.
+        
+        Args:
+            message: HandStartMessage object
+        """
+        try:
+            game_id = message.gameId
+            
+            # Reset hand-related state
+            self.pot_size = 0
+            self.current_bet = 0
+            self.phase = GamePhase.PREFLOP
+            self.community_cards = []
+            
+            # Get dealt cards if available
+            if message.HasField("plainCards"):
+                card1 = message.plainCards.plainCard1
+                card2 = message.plainCards.plainCard2
+                
+                # Convert cards to our format
+                rank1, suit1 = self._convert_card_id(card1)
+                rank2, suit2 = self._convert_card_id(card2)
+                
+                self.hand_cards = [
+                    Card(rank1, suit1),
+                    Card(rank2, suit2)
+                ]
+                
+                logger.info(f"Hand started. Hole cards: {self.hand_cards[0]} {self.hand_cards[1]}")
+            elif message.HasField("encryptedCards"):
+                # We can't read encrypted cards, will need to wait for them to be revealed
+                logger.info("Hand started with encrypted cards. Waiting for reveal.")
+                self.hand_cards = []
+            
+            # Get small blind amount
+            self.small_blind = message.smallBlind
+            logger.info(f"Small blind: {self.small_blind}")
+            
+            # Get dealer position if available
+            if message.HasField("dealerPlayerId"):
+                self.dealer_position = message.dealerPlayerId
+                logger.info(f"Dealer position: Player {self.dealer_position}")
+            
+            # Get player state information
+            if message.seatStates:
+                # Update active players
+                active_count = 0
+                for i, state in enumerate(message.seatStates):
+                    if i in self.player_states:
+                        active = (state == pokerth_pb2.NetPlayerState.netPlayerStateNormal)
+                        self.player_states[i]['active'] = active
+                        if active:
+                            active_count += 1
+                
+                self.active_players = active_count
+                logger.info(f"Active players: {self.active_players}")
+        
+        except Exception as e:
+            logger.error(f"Error handling hand start: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+    def _convert_card_id(self, card_id):
+        """
+        Convert PokerTH card ID to our rank and suit format.
+        
+        Args:
+            card_id: Card ID from PokerTH
+            
+        Returns:
+            Tuple[Rank, Suit]: Card rank and suit in our format
+        """
+        # Card ID is a number from 0-51
+        # Rank is card_id % 13 (0=2, 12=Ace)
+        # Suit is card_id // 13 (0=Clubs, 1=Diamonds, 2=Hearts, 3=Spades)
+        
+        rank_value = (card_id % 13) + 2  # Map 0-12 to 2-14
+        suit_value = card_id // 13
+        
+        rank = Rank(rank_value)
+        
+        suit_map = {
+            0: Suit.CLUBS,
+            1: Suit.DIAMONDS,
+            2: Suit.HEARTS,
+            3: Suit.SPADES
+        }
+        
+        suit = suit_map.get(suit_value, Suit.SPADES)
+        
+        return rank, suit
+
+    def _handle_players_turn(self, message):
+        """
+        Handle players turn message.
+        
+        Args:
+            message: PlayersTurnMessage object
+        """
+        try:
+            game_id = message.gameId
+            player_id = message.playerId
+            game_state = message.gameState
+            
+            # Check if it's our turn
+            if player_id == self.player_id:
+                logger.info("It's our turn to act")
+                
+                # Update game state
+                self.my_turn = True
+                
+                # The game state tells us what phase we're in
+                state_to_phase = {
+                    pokerth_pb2.NetGameState.netStatePreflop: GamePhase.PREFLOP,
+                    pokerth_pb2.NetGameState.netStateFlop: GamePhase.FLOP,
+                    pokerth_pb2.NetGameState.netStateTurn: GamePhase.TURN,
+                    pokerth_pb2.NetGameState.netStateRiver: GamePhase.RIVER,
+                    pokerth_pb2.NetGameState.netStatePreflopSmallBlind: GamePhase.PREFLOP,
+                    pokerth_pb2.NetGameState.netStatePreflopBigBlind: GamePhase.PREFLOP
+                }
+                
+                if game_state in state_to_phase:
+                    self.phase = state_to_phase[game_state]
+                
+                # We need to request an action in response to this
+                # For now, we'll make a simple decision and update later
+                # with more specific information from other messages
+                self._make_simple_action()
+            else:
+                # Get player name if available
+                player_name = self.player_states.get(player_id, {}).get('name', f"Player {player_id}")
+                logger.info(f"Player {player_name} to act next")
+        
+        except Exception as e:
+            logger.error(f"Error handling players turn: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+    def _make_simple_action(self):
+        """Make a simple action when it's our turn."""
+        try:
+            # Default to checking if possible, otherwise calling
+            if self.current_bet == 0:
+                self._send_player_action(pokerth_pb2.NetPlayerAction.netActionCheck)
+            else:
+                # If the bet is too high, fold
+                if self.current_bet > self.my_chips * 0.3:
+                    self._send_player_action(pokerth_pb2.NetPlayerAction.netActionFold)
+                else:
+                    self._send_player_action(pokerth_pb2.NetPlayerAction.netActionCall)
+            
+            # Reset turn flag
+            self.my_turn = False
+        
+        except Exception as e:
+            logger.error(f"Error making simple action: {e}")
+            # Default to fold on error
+            self._send_player_action(pokerth_pb2.NetPlayerAction.netActionFold)
+            self.my_turn = False
+
     def run(self):
         """Run the client, connecting and playing in games."""
         if not self.connect():
