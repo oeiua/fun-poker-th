@@ -119,7 +119,13 @@ class PokerTHProtobufClient:
         # Load model if provided
         if model_path and os.path.exists(model_path):
             self._load_model(model_path)
-    
+
+    def _print_available_message_types(self):
+        """Print all available message type enum values for debugging."""
+        logger.info("Available message types in PokerTHMessage.PokerTHMessageType:")
+        for name, value in pokerth_pb2.PokerTHMessage.PokerTHMessageType.items():
+            logger.info(f"  {name}: {value}")
+
     def _load_model(self, model_path: str):
         """
         Load the AI model from the given path.
@@ -184,28 +190,43 @@ class PokerTHProtobufClient:
     def _send_auth_request(self):
         """Send authentication request using Protocol Buffers."""
         try:
-            # Create auth request message
-            auth_request = pokerth_pb2.AuthClientRequestMessage()
-            auth_request.requested_version = self.protocol_version
-            auth_request.login_type = pokerth_pb2.AuthClientRequestMessage.Type.AUTHENTIFICATION
-            auth_request.login_name = self.username
-            auth_request.password = self.password
+            # Create init message
+            init_message = pokerth_pb2.InitMessage()
             
-            # Set client user data
-            auth_request.client_user_data.application_version = "PokerTH 1.1.2"
-            auth_request.client_user_data.build_id = 20200101  # Example build number
+            # Set the version properly
+            version = pokerth_pb2.AnnounceMessage.Version()
+            version.majorVersion = self.protocol_version
+            version.minorVersion = 0
+            init_message.requestedVersion.CopyFrom(version)
+            
+            init_message.buildId = 20200101  # Required field - use a reasonable build ID
+            
+            # For authenticated login
+            if self.password:
+                init_message.login = pokerth_pb2.InitMessage.LoginType.authenticatedLogin
+                # For auth login, we need to set authServerPassword instead of password
+                init_message.authServerPassword = self.password
+            else:
+                # For guest login
+                init_message.login = pokerth_pb2.InitMessage.LoginType.guestLogin
+            
+            # Set nickname
+            init_message.nickName = self.username
             
             # Create envelope message
             envelope = pokerth_pb2.PokerTHMessage()
-            envelope.type = pokerth_pb2.PokerTHMessage.Type.Type_AuthClientRequestMessage
-            envelope.auth_client_request_message.CopyFrom(auth_request)
+            envelope.messageType = pokerth_pb2.PokerTHMessage.PokerTHMessageType.Type_InitMessage
+            envelope.initMessage.CopyFrom(init_message)
             
             # Serialize and send
             self._send_protobuf_message(envelope)
+            
             logger.info(f"Sent authentication request for user: {self.username}")
         
         except Exception as e:
             logger.error(f"Error sending auth request: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             self.disconnect()
     
     def _send_guest_auth_request(self):
@@ -214,20 +235,23 @@ class PokerTHProtobufClient:
             # Create guest name with random number to avoid collisions
             guest_name = f"Guest_{random.randint(1000, 9999)}"
             
-            # Create auth request message
-            auth_request = pokerth_pb2.AuthClientRequestMessage()
-            auth_request.requested_version = self.protocol_version
-            auth_request.login_type = pokerth_pb2.AuthClientRequestMessage.Type.GUEST_LOGIN
-            auth_request.guest_name = guest_name
+            # Create init message
+            init_message = pokerth_pb2.InitMessage()
             
-            # Set client user data
-            auth_request.client_user_data.application_version = "PokerTH 1.1.2"
-            auth_request.client_user_data.build_id = 20200101  # Example build number
+            # Set the version properly
+            version = pokerth_pb2.AnnounceMessage.Version()
+            version.majorVersion = self.protocol_version
+            version.minorVersion = 0
+            init_message.requestedVersion.CopyFrom(version)
+            
+            init_message.buildId = 20200101  # Required field - use a reasonable build ID
+            init_message.login = pokerth_pb2.InitMessage.LoginType.guestLogin
+            init_message.nickName = guest_name
             
             # Create envelope message
             envelope = pokerth_pb2.PokerTHMessage()
-            envelope.type = pokerth_pb2.PokerTHMessage.Type.Type_AuthClientRequestMessage
-            envelope.auth_client_request_message.CopyFrom(auth_request)
+            envelope.messageType = pokerth_pb2.PokerTHMessage.PokerTHMessageType.Type_InitMessage
+            envelope.initMessage.CopyFrom(init_message)
             
             # Serialize and send
             self._send_protobuf_message(envelope)
@@ -284,7 +308,7 @@ class PokerTHProtobufClient:
         except Exception as e:
             logger.error(f"Error sending game list request: {e}")
     
-    def _send_join_game_request(self, game_id: int, password: str = ""):
+    def _send_join_game_request(self, game_id, password=""):
         """
         Send request to join a game.
         
@@ -293,16 +317,16 @@ class PokerTHProtobufClient:
             password (str): Password if required
         """
         try:
-            # Create join game request message
-            request = pokerth_pb2.JoinGameRequestMessage()
-            request.game_id = game_id
+            # Create join existing game message
+            request = pokerth_pb2.JoinExistingGameMessage()
+            request.gameId = game_id
             if password:
                 request.password = password
             
             # Create envelope message
             envelope = pokerth_pb2.PokerTHMessage()
-            envelope.type = pokerth_pb2.PokerTHMessage.Type.Type_JoinGameRequestMessage
-            envelope.join_game_request_message.CopyFrom(request)
+            envelope.messageType = pokerth_pb2.PokerTHMessage.PokerTHMessageType.Type_JoinExistingGameMessage
+            envelope.joinExistingGameMessage.CopyFrom(request)
             
             # Serialize and send
             self._send_protobuf_message(envelope)
@@ -310,8 +334,10 @@ class PokerTHProtobufClient:
         
         except Exception as e:
             logger.error(f"Error sending join game request: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
     
-    def _send_create_game_request(self, game_name: str, password: str = ""):
+    def _send_create_game_request(self, game_name, password=""):
         """
         Send request to create a new game.
         
@@ -320,24 +346,31 @@ class PokerTHProtobufClient:
             password (str): Password protection (optional)
         """
         try:
-            # Create game creation request message
-            request = pokerth_pb2.CreateGameRequestMessage()
-            request.game_name = game_name
+            # Create join new game message with game info
+            request = pokerth_pb2.JoinNewGameMessage()
+            
+            # Set up game info
+            game_info = pokerth_pb2.NetGameInfo()
+            game_info.gameName = game_name
+            game_info.netGameType = pokerth_pb2.NetGameInfo.NetGameType.normalGame
+            game_info.maxNumPlayers = 10
+            game_info.raiseIntervalMode = pokerth_pb2.NetGameInfo.RaiseIntervalMode.raiseOnHandNum
+            game_info.raiseEveryHands = 10
+            game_info.endRaiseMode = pokerth_pb2.NetGameInfo.EndRaiseMode.doubleBlinds
+            game_info.proposedGuiSpeed = 4
+            game_info.delayBetweenHands = 7
+            game_info.playerActionTimeout = 20
+            game_info.firstSmallBlind = 10
+            game_info.startMoney = 3000
+            
+            request.gameInfo.CopyFrom(game_info)
             if password:
                 request.password = password
             
-            # Set game rules
-            request.max_num_players = 10
-            request.start_money = 10000
-            request.small_blind = 50
-            request.big_blind = 100
-            request.raise_interval_mode = pokerth_pb2.CreateGameRequestMessage.RaiseIntervalMode.RAISE_ON_HANDNUMBER
-            request.raise_every_hands = 10
-            
             # Create envelope message
             envelope = pokerth_pb2.PokerTHMessage()
-            envelope.type = pokerth_pb2.PokerTHMessage.Type.Type_CreateGameRequestMessage
-            envelope.create_game_request_message.CopyFrom(request)
+            envelope.messageType = pokerth_pb2.PokerTHMessage.PokerTHMessageType.Type_JoinNewGameMessage
+            envelope.joinNewGameMessage.CopyFrom(request)
             
             # Serialize and send
             self._send_protobuf_message(envelope)
@@ -345,6 +378,8 @@ class PokerTHProtobufClient:
         
         except Exception as e:
             logger.error(f"Error sending create game request: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
     
     def _send_player_action(self, action_type: int, amount: Optional[int] = None):
         """
@@ -404,14 +439,21 @@ class PokerTHProtobufClient:
             # Serialize the message
             serialized_data = message.SerializeToString()
             
-            # Send the message
-            self.sock.sendall(serialized_data)
+            # Send the message with appropriate header
+            # The PokerTH protocol needs a 4-byte size header
+            size = len(serialized_data)
+            header = struct.pack('!I', size)
+            
+            # Send header followed by message
+            self.sock.sendall(header + serialized_data)
             
             # Debug logging
-            logger.debug(f">>> SEND Message type: {message.type}")
+            logger.debug(f">>> SEND Message type: {message.messageType}")
         
         except Exception as e:
             logger.error(f"Error sending protobuf message: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             self.disconnect()
     
     def _receive_data(self) -> bool:
@@ -438,8 +480,27 @@ class PokerTHProtobufClient:
             # Debug logging
             logger.debug(f"<<< RECV {len(data)} bytes")
             
-            # Process received data
-            self._process_message(data)
+            # Add received data to buffer
+            self.buffer.extend(data)
+            
+            # Process complete messages in the buffer
+            while len(self.buffer) >= 4:  # Need at least 4 bytes for size header
+                # Extract message size from header
+                msg_size = struct.unpack('!I', self.buffer[:4])[0]
+                
+                # Check if we have a complete message
+                if len(self.buffer) >= 4 + msg_size:
+                    # Extract the message
+                    message_data = self.buffer[4:4+msg_size]
+                    
+                    # Remove processed message from buffer
+                    self.buffer = self.buffer[4+msg_size:]
+                    
+                    # Process the message
+                    self._process_message(message_data)
+                else:
+                    # Not enough data for a complete message
+                    break
             
             return True
         
@@ -448,16 +509,8 @@ class PokerTHProtobufClient:
             return True
         
         except socket.error as e:
-            # More detailed socket error handling
-            if e.errno == 104:  # Connection reset by peer
-                logger.error("Connection reset by peer")
-            elif e.errno == 32:  # Broken pipe
-                logger.error("Broken pipe")
-            elif e.errno == 111:  # Connection refused
-                logger.error("Connection refused")
-            else:
-                logger.error(f"Socket error {e.errno}: {e}")
-            
+            # Socket error handling...
+            logger.error(f"Socket error: {e}")
             self.connected = False
             return False
         
@@ -480,39 +533,69 @@ class PokerTHProtobufClient:
             message = pokerth_pb2.PokerTHMessage()
             message.ParseFromString(data)
             
-            # Handle based on message type
-            if message.type == pokerth_pb2.PokerTHMessage.Type.Type_AuthServerChallengeMessage:
-                self._handle_auth_challenge(message.auth_server_challenge_message)
+            # Log the message type
+            logger.debug(f"Received message type: {message.messageType}")
             
-            elif message.type == pokerth_pb2.PokerTHMessage.Type.Type_AuthServerVerificationMessage:
-                self._handle_auth_verification(message.auth_server_verification_message)
+            # Handle based on message type - use correct enum values
+            if message.messageType == pokerth_pb2.PokerTHMessage.PokerTHMessageType.Type_AuthServerChallengeMessage:
+                self._handle_auth_challenge(message.authServerChallengeMessage)
             
-            elif message.type == pokerth_pb2.PokerTHMessage.Type.Type_InitDoneMessage:
+            elif message.messageType == pokerth_pb2.PokerTHMessage.PokerTHMessageType.Type_AuthServerVerificationMessage:
+                self._handle_auth_verification(message.authServerVerificationMessage)
+            
+            elif message.messageType == pokerth_pb2.PokerTHMessage.PokerTHMessageType.Type_InitAckMessage:
                 self._handle_init_done()
             
-            elif message.type == pokerth_pb2.PokerTHMessage.Type.Type_GameListMessage:
-                self._handle_game_list(message.game_list_message)
+            elif message.messageType == pokerth_pb2.PokerTHMessage.PokerTHMessageType.Type_GameListNewMessage:
+                self._handle_game_list(message.gameListNewMessage)
             
-            elif message.type == pokerth_pb2.PokerTHMessage.Type.Type_JoinGameReplyMessage:
-                self._handle_join_game_reply(message.join_game_reply_message)
+            elif message.messageType == pokerth_pb2.PokerTHMessage.PokerTHMessageType.Type_JoinGameAckMessage:
+                self._handle_join_game_reply(message.joinGameAckMessage)
             
-            elif message.type == pokerth_pb2.PokerTHMessage.Type.Type_CreateGameReplyMessage:
-                self._handle_create_game_reply(message.create_game_reply_message)
+            elif message.messageType == pokerth_pb2.PokerTHMessage.PokerTHMessageType.Type_JoinGameFailedMessage:
+                self._handle_join_game_failed(message.joinGameFailedMessage)
             
-            elif message.type == pokerth_pb2.PokerTHMessage.Type.Type_GameMessage:
-                self._handle_game_message(message.game_message)
+            elif message.messageType == pokerth_pb2.PokerTHMessage.PokerTHMessageType.Type_GamePlayerJoinedMessage:
+                self._handle_game_player_joined(message.gamePlayerJoinedMessage)
             
-            elif message.type == pokerth_pb2.PokerTHMessage.Type.Type_ErrorMessage:
-                self._handle_error(message.error_message)
+            elif message.messageType == pokerth_pb2.PokerTHMessage.PokerTHMessageType.Type_HandStartMessage:
+                self._handle_hand_start(message.handStartMessage)
+            
+            elif message.messageType == pokerth_pb2.PokerTHMessage.PokerTHMessageType.Type_PlayersTurnMessage:
+                self._handle_players_turn(message.playersTurnMessage)
+            
+            elif message.messageType == pokerth_pb2.PokerTHMessage.PokerTHMessageType.Type_ErrorMessage:
+                self._handle_error(message.errorMessage)
             
             else:
-                logger.debug(f"Received unhandled message type: {message.type}")
+                logger.debug(f"Received unhandled message type: {message.messageType}")
         
         except Exception as e:
             logger.error(f"Error processing message: {e}")
             import traceback
             logger.error(traceback.format_exc())
-    
+
+    def _request_game_list(self):
+        """Send a request to get the list of available games."""
+        try:
+            # Create subscription request message to get game list
+            request = pokerth_pb2.SubscriptionRequestMessage()
+            request.subscriptionAction = pokerth_pb2.SubscriptionRequestMessage.SubscriptionAction.resubscribeGameList
+            
+            # Create envelope message
+            envelope = pokerth_pb2.PokerTHMessage()
+            envelope.messageType = pokerth_pb2.PokerTHMessage.PokerTHMessageType.Type_SubscriptionRequestMessage
+            envelope.subscriptionRequestMessage.CopyFrom(request)
+            
+            # Serialize and send
+            self._send_protobuf_message(envelope)
+            logger.info("Sent game list request")
+        
+        except Exception as e:
+            logger.error(f"Error sending game list request: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
     def _handle_auth_challenge(self, challenge):
         """
         Handle authentication challenge.
@@ -565,54 +648,47 @@ class PokerTHProtobufClient:
         """Handle initialization done message."""
         logger.info("Connection initialization completed")
         
-        # Request game list or join/create a game
+        # Request game list or create a game directly
         if self.game_name:
             # We have a specific game to join/create
+            # First request the game list to see if it exists
             self._request_game_list()
         else:
-            # Just request the game list
+            # Just request the game list and join any available game
             self._request_game_list()
-    
 
-    def _handle_game_list(self, game_list):
+    def _handle_game_list(self, game_list_message):
         """
         Handle game list message.
         
         Args:
-            game_list: Game list message
+            game_list_message: Game list message
         """
         try:
-            if game_list.type == pokerth_pb2.GameListMessage.Type.GAME_LIST_EVENT:
-                games = game_list.game_info
-                
-                logger.info(f"Received {len(games)} games:")
-                for i, game in enumerate(games):
-                    logger.info(f"{i+1}. {game.game_name} ({len(game.player_ids)}/{game.max_num_players})")
-                
-                # If we have a specific game name, try to find and join it
-                if self.game_name:
-                    # Look for a game with matching name
-                    for game in games:
-                        if game.game_name == self.game_name:
-                            logger.info(f"Found game '{self.game_name}', joining...")
-                            self._send_join_game_request(game.game_id)
-                            return
-                    
-                    # Game not found, create it
-                    logger.info(f"Game '{self.game_name}' not found, creating...")
-                    self._send_create_game_request(self.game_name)
-                elif games:
-                    # Join the first game
-                    logger.info(f"Joining game '{games[0].game_name}'")
-                    self._send_join_game_request(games[0].game_id)
-                else:
-                    # No games available, create one
-                    default_name = f"{self.username}'s Game"
-                    logger.info(f"No games available, creating '{default_name}'")
-                    self._send_create_game_request(default_name)
+            # For GameListNewMessage, extract game info
+            game_id = game_list_message.gameId
+            game_name = game_list_message.gameInfo.gameName
+            max_players = game_list_message.gameInfo.maxNumPlayers
+            current_players = len(game_list_message.playerIds)
+            
+            logger.info(f"Game: {game_name} (ID: {game_id}) - Players: {current_players}/{max_players}")
+            
+            # If we have a specific game name to join, check for a match
+            if self.game_name and game_name == self.game_name:
+                logger.info(f"Found game '{self.game_name}', joining...")
+                self._send_join_game_request(game_id)
+                return
+            
+            # If we don't have a specific game to join, join the first available game
+            if not self.game_name and current_players < max_players:
+                logger.info(f"Joining game '{game_name}'")
+                self._send_join_game_request(game_id)
+                return
         
         except Exception as e:
             logger.error(f"Error handling game list: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
     
     def _handle_join_game_reply(self, reply):
         """
@@ -907,25 +983,38 @@ class PokerTHProtobufClient:
             error_message: Error message
         """
         try:
-            error_code = error_message.error_code
+            error_code = error_message.errorReason
             
-            # Log error
-            logger.error(f"Server error: code {error_code}")
+            # Map error code to string description
+            error_descriptions = {
+                pokerth_pb2.ErrorMessage.ErrorReason.custReserved: "Reserved error",
+                pokerth_pb2.ErrorMessage.ErrorReason.initVersionNotSupported: "Protocol version not supported",
+                pokerth_pb2.ErrorMessage.ErrorReason.initServerFull: "Server is full",
+                pokerth_pb2.ErrorMessage.ErrorReason.initAuthFailure: "Authentication failure",
+                pokerth_pb2.ErrorMessage.ErrorReason.initPlayerNameInUse: "Player name already in use",
+                pokerth_pb2.ErrorMessage.ErrorReason.initInvalidPlayerName: "Invalid player name",
+                pokerth_pb2.ErrorMessage.ErrorReason.initServerMaintenance: "Server in maintenance mode",
+                pokerth_pb2.ErrorMessage.ErrorReason.initBlocked: "Connection blocked by server",
+                # Add more error codes as needed
+            }
+            
+            error_desc = error_descriptions.get(error_code, f"Unknown error code: {error_code}")
+            logger.error(f"Server error: {error_desc} (code {error_code})")
             
             # Handle specific errors
-            if error_code == pokerth_pb2.ErrorMessage.ErrorCode.ERROR_INVALID_STATE:
-                logger.error("Invalid state")
-            elif error_code == pokerth_pb2.ErrorMessage.ErrorCode.ERROR_INVALID_PACKET:
-                logger.error("Invalid packet")
+            if error_code == pokerth_pb2.ErrorMessage.ErrorReason.initBlocked:
+                logger.error("Your connection is blocked by the server. Try guest login or a different server.")
+                if not self.is_guest:
+                    logger.info("Automatically trying guest login...")
+                    self.is_guest = True
+                    self._send_guest_auth_request()
             
-            # For protocol errors, retry with guest login
-            if error_code == pokerth_pb2.ErrorMessage.ErrorCode.ERROR_INVALID_PACKET and not self.is_guest:
-                logger.info("Trying guest login instead...")
-                self.is_guest = True
-                self._send_guest_auth_request()
+            # Handle other error codes similarly...
         
         except Exception as e:
             logger.error(f"Error handling error message: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
     
     def _make_decision(self, to_call: int, min_raise: int, max_raise: int):
         """
@@ -1214,18 +1303,30 @@ def main():
     if not password and not args.guest and args.username != 'Guest':
         password = getpass.getpass(f"Enter password for {args.username}: ")
     
+    
+
     # Create and run the client
+    # client = PokerTHProtobufClient(
+    #     server=args.server,
+    #     port=args.port,
+    #     username=args.username,
+    #     password=password,
+    #     model_path=args.model,
+    #     game_name=args.game,
+    #     use_guest=args.guest,
+    #     protocol_version=args.protocol_version
+    # )
     client = PokerTHProtobufClient(
         server=args.server,
         port=args.port,
-        username=args.username,
-        password=password,
+        username="Guest",
+        password="",
         model_path=args.model,
         game_name=args.game,
-        use_guest=args.guest,
+        use_guest=True,
         protocol_version=args.protocol_version
     )
-    
+    # PokerTHProtobufClient._print_available_message_types(client)
     client.run()
 
 
