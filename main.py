@@ -1,125 +1,205 @@
-#!/usr/bin/env python
 """
-Main entry point for the Poker AI application.
+Main entry point for training the poker AI.
 """
-
 import os
 import argparse
-import yaml
-import logging
-import tensorflow as tf
-from datetime import datetime
+import torch
+import numpy as np
+import random
+import time
+from typing import Dict, Any
 
-from src.environment.game import PokerGame
-from src.training.trainer import Trainer
-from src.training.population import Population
-from src.utils.resource import setup_resources
+from config.config import Config
+from training.trainer import Trainer
+from utils.logger import Logger
+from utils.memory_tracker import track_memory_usage, force_gc
 
-
-def parse_args():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Poker AI using evolutionary neural networks')
-    parser.add_argument('--config', type=str, default='config/config.yaml',
-                        help='Path to configuration file')
-    parser.add_argument('--mode', type=str, choices=['train', 'play', 'evaluate'],
-                        default='train', help='Mode to run the application')
-    parser.add_argument('--checkpoint', type=str, default=None,
-                        help='Path to model checkpoint for continued training or playing')
-    parser.add_argument('--debug', action='store_true',
-                        help='Enable debug mode with more verbose output')
-    return parser.parse_args()
-
-
-def setup_logging(config, debug=False):
-    """Set up logging configuration."""
-    log_level = logging.DEBUG if debug else getattr(logging, config['logging']['level'])
+def set_random_seeds(seed: int = 42) -> None:
+    """
+    Set random seeds for reproducibility.
     
-    # Create logs directory if it doesn't exist
-    os.makedirs(config['logging']['save_path'], exist_ok=True)
+    Args:
+        seed: Random seed
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+def parse_arguments() -> argparse.Namespace:
+    """
+    Parse command-line arguments.
     
-    # Set up logging to file and console
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(config['logging']['save_path'], f"poker_ai_{timestamp}.log")
+    Returns:
+        Parsed arguments
+    """
+    parser = argparse.ArgumentParser(description="Train poker AI using evolutionary algorithms")
     
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ]
+    parser.add_argument(
+        "--generations",
+        type=int,
+        default=None,
+        help="Number of generations to train"
     )
     
-    logging.info(f"Logging initialized. Log file: {log_file}")
-
-
-def load_config(config_path):
-    """Load configuration from YAML file."""
-    with open(config_path, 'r') as file:
-        config = yaml.safe_load(file)
-    return config
-
-
-def train(config, checkpoint_path=None):
-    """Train the Poker AI model."""
-    logging.info("Starting training mode")
+    parser.add_argument(
+        "--population",
+        type=int,
+        default=None,
+        help="Population size"
+    )
     
-    # Initialize population and trainer
-    population = Population(config)
+    parser.add_argument(
+        "--eval-games",
+        type=int,
+        default=None,
+        help="Number of games for evaluation"
+    )
     
-    # Load from checkpoint if specified
-    if checkpoint_path:
-        logging.info(f"Loading population from checkpoint: {checkpoint_path}")
-        population.load(checkpoint_path)
+    parser.add_argument(
+        "--checkpoint-freq",
+        type=int,
+        default=None,
+        help="Checkpoint frequency (in generations)"
+    )
     
-    trainer = Trainer(config, population)
-    trainer.train()
-
-
-def play(config, checkpoint_path):
-    """Play against the AI."""
-    logging.info("Starting play mode")
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="Number of worker processes for parallel evaluation"
+    )
     
-    if not checkpoint_path:
-        logging.error("Checkpoint path must be specified for play mode")
-        return
+    parser.add_argument(
+        "--device",
+        type=str,
+        choices=["cpu", "cuda"],
+        default=None,
+        help="Device to use (cpu or cuda)"
+    )
     
-    # TODO: Implement play mode with human interface
-    game = PokerGame(config)
-    game.play_with_human(checkpoint_path)
-
-
-def evaluate(config, checkpoint_path):
-    """Evaluate the AI performance."""
-    logging.info("Starting evaluation mode")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility"
+    )
     
-    if not checkpoint_path:
-        logging.error("Checkpoint path must be specified for evaluation mode")
-        return
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Don't resume from checkpoint (start new training)"
+    )
     
-    # TODO: Implement evaluation mode
-    population = Population(config)
-    population.load(checkpoint_path)
-    population.evaluate()
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Run a test after training"
+    )
+    
+    return parser.parse_args()
 
-
-def main():
+def main() -> None:
     """Main function."""
-    args = parse_args()
-    config = load_config(args.config)
-    setup_logging(config, args.debug)
+    # Parse arguments
+    args = parse_arguments()
     
-    # Set up resources (CPU, GPU, memory)
-    setup_resources(config)
+    # Set random seeds
+    set_random_seeds(args.seed)
     
-    # Run in the specified mode
-    if args.mode == 'train':
-        train(config, args.checkpoint)
-    elif args.mode == 'play':
-        play(config, args.checkpoint)
-    elif args.mode == 'evaluate':
-        evaluate(config, args.checkpoint)
-
+    # Create configuration
+    config = Config()
+    
+    # Override config with command-line arguments
+    if args.generations is not None:
+        config.GENERATIONS = args.generations
+    
+    if args.population is not None:
+        config.POPULATION_SIZE = args.population
+    
+    if args.eval_games is not None:
+        config.NUM_EVAL_GAMES = args.eval_games
+    
+    if args.checkpoint_freq is not None:
+        config.CHECKPOINT_FREQUENCY = args.checkpoint_freq
+    
+    if args.num_workers is not None:
+        config.NUM_WORKERS = args.num_workers
+    
+    if args.device is not None:
+        config.DEVICE = torch.device(args.device)
+    
+    # Create logger
+    logger = Logger(os.path.join(config.LOGS_DIR, "training.log"))
+    
+    # Log configuration
+    logger.log_section("Configuration")
+    logger.info(f"Generations: {config.GENERATIONS}")
+    logger.info(f"Population size: {config.POPULATION_SIZE}")
+    logger.info(f"Evaluation games: {config.NUM_EVAL_GAMES}")
+    logger.info(f"Checkpoint frequency: {config.CHECKPOINT_FREQUENCY}")
+    logger.info(f"Number of workers: {config.NUM_WORKERS}")
+    logger.info(f"Device: {config.DEVICE}")
+    logger.info(f"Random seed: {args.seed}")
+    logger.info(f"Resume from checkpoint: {not args.no_resume}")
+    
+    # Check system
+    logger.log_section("System Check")
+    memory_info = track_memory_usage()
+    logger.log_memory_usage(memory_info)
+    
+    if torch.cuda.is_available():
+        logger.info(f"CUDA available: {torch.cuda.is_available()}")
+        logger.info(f"CUDA device count: {torch.cuda.device_count()}")
+        logger.info(f"CUDA device name: {torch.cuda.get_device_name(0)}")
+    else:
+        logger.info("CUDA not available, using CPU")
+    
+    # Create trainer
+    trainer = Trainer(config=config)
+    
+    # Start training
+    logger.log_section("Training")
+    training_history = trainer.train(
+        num_generations=config.GENERATIONS,
+        eval_games=config.NUM_EVAL_GAMES,
+        checkpoint_frequency=config.CHECKPOINT_FREQUENCY,
+        resume=not args.no_resume
+    )
+    
+    # Log training results
+    logger.log_section("Training Results")
+    if training_history:
+        last_gen = len(training_history['generation']) - 1
+        logger.info(f"Generations completed: {training_history['generation'][-1]}")
+        logger.info(f"Final average fitness: {training_history['avg_fitness'][-1]:.2f}")
+        logger.info(f"Final maximum fitness: {training_history['max_fitness'][-1]:.2f}")
+        logger.info(f"Best fitness achieved: {training_history['best_overall'][-1]:.2f}")
+    
+    # Run test if requested
+    if args.test:
+        logger.log_section("Testing Best Agent")
+        test_results = trainer.test_best_agent(num_games=1000)
+        
+        logger.info(f"Test fitness: {test_results['fitness']:.2f}")
+        logger.info(f"Hands played: {test_results['hands_played']}")
+        logger.info(f"Hands won: {test_results['hands_won']}")
+        logger.info(f"Win rate: {test_results['win_rate'] * 100:.2f}%")
+        logger.info(f"Total reward: {test_results['total_reward']:.2f}")
+    
+    # Clean up
+    force_gc()
+    
+    # Final memory usage
+    memory_info = track_memory_usage()
+    logger.log_memory_usage(memory_info)
+    
+    # Log elapsed time
+    logger.log_elapsed_time("Total training time")
 
 if __name__ == "__main__":
     main()
