@@ -172,139 +172,6 @@ class Population:
         
         return parents
     
-    def create_offspring(
-        self,
-        parents: List[NeuralAgent],
-        mutation_rate: float = 0.05,
-        crossover_rate: float = 0.7
-    ) -> List[NeuralAgent]:
-        """
-        Create offspring from selected parents through crossover and mutation.
-        
-        Args:
-            parents: List of parent agents
-            mutation_rate: Probability of mutation for each parameter
-            crossover_rate: Probability of crossover between parents
-            
-        Returns:
-            List of offspring agents
-        """
-        offspring = []
-        
-        # Number of offspring to create
-        num_offspring = self.population_size - len(parents)
-        
-        for i in range(num_offspring):
-            # Select two random parents
-            parent1, parent2 = np.random.choice(parents, 2, replace=False)
-            
-            # Create new networks
-            policy_network = self._create_offspring_network(
-                parent1.policy_network,
-                parent2.policy_network,
-                mutation_rate,
-                crossover_rate
-            )
-            
-            value_network = self._create_offspring_network(
-                parent1.value_network,
-                parent2.value_network,
-                mutation_rate,
-                crossover_rate
-            )
-            
-            # Create new agent
-            agent = NeuralAgent(
-                policy_network=policy_network,
-                value_network=value_network,
-                name=f"Agent-Gen{self.current_generation + 1}-{i}",
-                exploration_rate=max(0.01, parent1.exploration_rate * 0.99),  # Gradually reduce exploration
-                device=self.device
-            )
-            
-            offspring.append(agent)
-        
-        return offspring
-    
-    def _create_offspring_network(
-        self,
-        network1: torch.nn.Module,
-        network2: torch.nn.Module,
-        mutation_rate: float,
-        crossover_rate: float
-    ) -> torch.nn.Module:
-        """
-        Create a new network from two parent networks.
-        
-        Args:
-            network1: First parent network
-            network2: Second parent network
-            mutation_rate: Probability of mutation for each parameter
-            crossover_rate: Probability of crossover between parents
-            
-        Returns:
-            New network
-        """
-        # Determine network type and create a new instance
-        if isinstance(network1, PolicyNetwork):
-            new_network = PolicyNetwork(
-                input_size=network1.input_size,
-                hidden_layers=network1.hidden_layers,
-                output_size=network1.output_size,
-                device=self.device
-            )
-        elif isinstance(network1, ValueNetwork):
-            new_network = ValueNetwork(
-                input_size=network1.input_size,
-                hidden_layers=network1.hidden_layers,
-                device=self.device
-            )
-        else:
-            raise ValueError(f"Unsupported network type: {type(network1)}")
-        
-        # Get state dictionaries
-        state_dict1 = network1.state_dict()
-        state_dict2 = network2.state_dict()
-        new_state_dict = new_network.state_dict()
-        
-        # Apply crossover and mutation
-        for key in new_state_dict:
-            # Crossover
-            if np.random.random() < crossover_rate:
-                # Handle different tensor types appropriately
-                tensor = new_state_dict[key]
-                if tensor.dtype == torch.long or tensor.dtype == torch.int64 or tensor.dtype == torch.int32:
-                    # For integer tensors, use a numpy-based approach
-                    mask = (np.random.rand(*tensor.shape) < 0.5)
-                    tensor1 = state_dict1[key].cpu().numpy()
-                    tensor2 = state_dict2[key].cpu().numpy()
-                    result = np.where(mask, tensor1, tensor2)
-                    new_state_dict[key] = torch.tensor(result, dtype=tensor.dtype, device=tensor.device)
-                else:
-                    # For float tensors, use the PyTorch approach
-                    mask = torch.rand_like(tensor, dtype=torch.float) < 0.5
-                    new_state_dict[key] = torch.where(mask, state_dict1[key], state_dict2[key])
-            else:
-                # No crossover, just inherit from first parent
-                new_state_dict[key] = state_dict1[key].clone()
-            
-            # Mutation
-            if np.random.random() < mutation_rate:
-                tensor = new_state_dict[key]
-                if tensor.dtype == torch.long or tensor.dtype == torch.int64 or tensor.dtype == torch.int32:
-                    # For integer tensors, add small integer noise
-                    noise = torch.randint_like(tensor, low=-1, high=2)  # -1, 0, or 1
-                    new_state_dict[key] = torch.clamp(tensor + noise, min=0)  # Ensure non-negative
-                else:
-                    # For float tensors, add normal noise
-                    noise = torch.randn_like(tensor) * 0.1
-                    new_state_dict[key] += noise
-        
-        # Load the new state dictionary
-        new_network.load_state_dict(new_state_dict)
-        
-        return new_network
-    
     def evolve(
         self,
         evaluate_func: Callable[[NeuralAgent], float],
@@ -489,7 +356,232 @@ class Population:
         except Exception as e:
             print(f"Error loading population: {str(e)}")
             return False
-    
+
+    def create_offspring(
+        self,
+        parents: List[NeuralAgent],
+        mutation_rate: float = 0.05,
+        crossover_rate: float = 0.7
+    ) -> List[NeuralAgent]:
+        """
+        Create offspring from selected parents through crossover and mutation.
+        
+        Args:
+            parents: List of parent agents
+            mutation_rate: Probability of mutation for each parameter
+            crossover_rate: Probability of crossover between parents
+            
+        Returns:
+            List of offspring agents
+        """
+        offspring = []
+        
+        # Number of offspring to create
+        num_offspring = self.population_size - len(parents)
+        
+        for i in range(num_offspring):
+            # Select two random parents with valid networks
+            valid_parents = [p for p in parents if p.policy_network is not None and p.value_network is not None]
+            
+            # If we don't have at least 2 valid parents, create a new random agent
+            if len(valid_parents) < 2:
+                # Create new random networks
+                policy_network = PolicyNetwork(
+                    input_size=self.input_size,
+                    hidden_layers=self.hidden_layers,
+                    output_size=self.output_size,
+                    device=self.device
+                )
+                
+                value_network = ValueNetwork(
+                    input_size=self.input_size,
+                    hidden_layers=self.hidden_layers,
+                    device=self.device
+                )
+                
+                # Create new agent with random networks
+                agent = NeuralAgent(
+                    policy_network=policy_network,
+                    value_network=value_network,
+                    name=f"Agent-Gen{self.current_generation + 1}-{i}",
+                    exploration_rate=0.1,  # Default exploration rate
+                    device=self.device
+                )
+                
+                offspring.append(agent)
+                continue
+            
+            # Select two random parents from valid ones
+            parent1, parent2 = np.random.choice(valid_parents, 2, replace=False)
+            
+            # Create new networks
+            policy_network = None
+            if parent1.policy_network is not None and parent2.policy_network is not None:
+                policy_network = self._create_offspring_network(
+                    parent1.policy_network,
+                    parent2.policy_network,
+                    mutation_rate,
+                    crossover_rate
+                )
+            elif parent1.policy_network is not None:
+                # Copy from parent1 if parent2 doesn't have a policy network
+                policy_network = self._clone_network(parent1.policy_network)
+            elif parent2.policy_network is not None:
+                # Copy from parent2 if parent1 doesn't have a policy network
+                policy_network = self._clone_network(parent2.policy_network)
+            
+            value_network = None
+            if parent1.value_network is not None and parent2.value_network is not None:
+                value_network = self._create_offspring_network(
+                    parent1.value_network,
+                    parent2.value_network,
+                    mutation_rate,
+                    crossover_rate
+                )
+            elif parent1.value_network is not None:
+                # Copy from parent1 if parent2 doesn't have a value network
+                value_network = self._clone_network(parent1.value_network)
+            elif parent2.value_network is not None:
+                # Copy from parent2 if parent1 doesn't have a value network
+                value_network = self._clone_network(parent2.value_network)
+            
+            # Create new agent
+            agent = NeuralAgent(
+                policy_network=policy_network,
+                value_network=value_network,
+                name=f"Agent-Gen{self.current_generation + 1}-{i}",
+                exploration_rate=max(0.01, parent1.exploration_rate * 0.99),  # Gradually reduce exploration
+                device=self.device
+            )
+            
+            offspring.append(agent)
+        
+        return offspring
+
+    def _clone_network(self, network):
+        """
+        Create a clone of a network.
+        
+        Args:
+            network: Network to clone
+            
+        Returns:
+            Cloned network
+        """
+        if network is None:
+            return None
+            
+        # Determine network type and create a new instance
+        if isinstance(network, PolicyNetwork):
+            new_network = PolicyNetwork(
+                input_size=network.input_size,
+                hidden_layers=network.hidden_layers,
+                output_size=network.output_size,
+                device=self.device
+            )
+        elif isinstance(network, ValueNetwork):
+            new_network = ValueNetwork(
+                input_size=network.input_size,
+                hidden_layers=network.hidden_layers,
+                device=self.device
+            )
+        else:
+            raise ValueError(f"Unsupported network type: {type(network)}")
+        
+        # Copy parameters
+        new_network.load_state_dict(network.state_dict())
+        
+        return new_network
+
+    def _create_offspring_network(
+        self,
+        network1: torch.nn.Module,
+        network2: torch.nn.Module,
+        mutation_rate: float,
+        crossover_rate: float
+    ) -> torch.nn.Module:
+        """
+        Create a new network from two parent networks.
+        
+        Args:
+            network1: First parent network
+            network2: Second parent network
+            mutation_rate: Probability of mutation for each parameter
+            crossover_rate: Probability of crossover between parents
+            
+        Returns:
+            New network
+        """
+        # Check for None values
+        if network1 is None or network2 is None:
+            if network1 is not None:
+                return self._clone_network(network1)
+            elif network2 is not None:
+                return self._clone_network(network2)
+            else:
+                raise ValueError("Both networks are None, cannot create offspring")
+        
+        # Determine network type and create a new instance
+        if isinstance(network1, PolicyNetwork):
+            new_network = PolicyNetwork(
+                input_size=network1.input_size,
+                hidden_layers=network1.hidden_layers,
+                output_size=network1.output_size,
+                device=self.device
+            )
+        elif isinstance(network1, ValueNetwork):
+            new_network = ValueNetwork(
+                input_size=network1.input_size,
+                hidden_layers=network1.hidden_layers,
+                device=self.device
+            )
+        else:
+            raise ValueError(f"Unsupported network type: {type(network1)}")
+        
+        # Get state dictionaries
+        state_dict1 = network1.state_dict()
+        state_dict2 = network2.state_dict()
+        new_state_dict = new_network.state_dict()
+        
+        # Apply crossover and mutation
+        for key in new_state_dict:
+            # Crossover
+            if np.random.random() < crossover_rate:
+                # Handle different tensor types appropriately
+                tensor = new_state_dict[key]
+                if tensor.dtype == torch.long or tensor.dtype == torch.int64 or tensor.dtype == torch.int32:
+                    # For integer tensors, use a numpy-based approach
+                    mask = (np.random.rand(*tensor.shape) < 0.5)
+                    tensor1 = state_dict1[key].cpu().numpy()
+                    tensor2 = state_dict2[key].cpu().numpy()
+                    result = np.where(mask, tensor1, tensor2)
+                    new_state_dict[key] = torch.tensor(result, dtype=tensor.dtype, device=tensor.device)
+                else:
+                    # For float tensors, use the PyTorch approach
+                    mask = torch.rand_like(tensor, dtype=torch.float) < 0.5
+                    new_state_dict[key] = torch.where(mask, state_dict1[key], state_dict2[key])
+            else:
+                # No crossover, just inherit from first parent
+                new_state_dict[key] = state_dict1[key].clone()
+            
+            # Mutation
+            if np.random.random() < mutation_rate:
+                tensor = new_state_dict[key]
+                if tensor.dtype == torch.long or tensor.dtype == torch.int64 or tensor.dtype == torch.int32:
+                    # For integer tensors, add small integer noise
+                    noise = torch.randint_like(tensor, low=-1, high=2)  # -1, 0, or 1
+                    new_state_dict[key] = torch.clamp(tensor + noise, min=0)  # Ensure non-negative
+                else:
+                    # For float tensors, add normal noise
+                    noise = torch.randn_like(tensor) * 0.1
+                    new_state_dict[key] += noise
+        
+        # Load the new state dictionary
+        new_network.load_state_dict(new_state_dict)
+        
+        return new_network
+
+
     def get_best_agent(self) -> NeuralAgent:
         """
         Get the best agent in the current population.
