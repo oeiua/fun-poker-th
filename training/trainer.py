@@ -1,16 +1,17 @@
 """
-Main training loop for evolutionary poker AI.
+Main training loop for evolutionary poker AI with single-thread GPU usage.
 """
 import os
 import time
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
-from typing import List, Dict, Any, Optional, Tuple, Union
 import multiprocessing as mp
+from multiprocessing import Queue, Process
+from typing import List, Dict, Any, Optional, Tuple, Union
 import gc
 import psutil
-import datetime
+import copy
+import pickle
 from tqdm import tqdm
 
 from config.config import Config
@@ -27,6 +28,7 @@ from utils.logger import Logger
 class Trainer:
     """
     Manages the training process for poker AI using evolutionary algorithms.
+    Restricts GPU usage to a single thread to prevent file handle exhaustion.
     """
     
     def __init__(
@@ -36,15 +38,7 @@ class Trainer:
         logs_dir: Optional[str] = None,
         num_workers: Optional[int] = None
     ):
-        """
-        Initialize the trainer.
-        
-        Args:
-            config: Configuration parameters
-            models_dir: Directory to save models
-            logs_dir: Directory to save logs
-            num_workers: Number of worker processes for parallel evaluation
-        """
+        """Initialize the trainer."""
         # Initialize config
         self.config = config or Config()
         
@@ -63,7 +57,7 @@ class Trainer:
         
         # Set up parallel processing
         self.num_workers = num_workers or self.config.NUM_WORKERS
-        self.logger.info(f"Using {self.num_workers} worker processes")
+        self.logger.info(f"Using {self.num_workers} worker processes for evaluation")
         
         # Initialize population
         self.population = Population(
@@ -88,81 +82,144 @@ class Trainer:
         
         # Memory usage tracking
         self.memory_usage = []
-    
-    def evaluate_agent(self, agent: BaseAgent, num_games: int = 100, opponents: Optional[List[BaseAgent]] = None) -> float:
-        """
-        Evaluate an agent's performance.
         
-        Args:
-            agent: Agent to evaluate
-            num_games: Number of games to play
-            opponents: List of opponent agents (if None, uses random agents)
+        # CPU-only evaluation flag
+        self.use_cpu_for_eval = True if torch.cuda.is_available() else False
+        
+    def _cpu_compatible_agent(self, agent):
+        """Create a CPU-compatible copy of an agent for evaluation."""
+        # Create a simplified version of the agent that uses CPU only
+        # We'll only copy the necessary data without the neural networks
+        cpu_agent = copy.copy(agent)
+        
+        # Create simplified policy network
+        if agent.policy_network:
+            # Save policy network to a temporary file
+            temp_policy_path = os.path.join(self.models_dir, f"temp_{id(agent)}_policy.pt")
+            agent.policy_network.save(temp_policy_path)
+            cpu_agent.policy_network_path = temp_policy_path
+            cpu_agent.policy_network = None
             
-        Returns:
-            Fitness score (average profit per hand)
-        """
-        # Create default opponents if not provided
-        if not opponents:
+        # Create simplified value network
+        if agent.value_network:
+            # Save value network to a temporary file
+            temp_value_path = os.path.join(self.models_dir, f"temp_{id(agent)}_value.pt")
+            agent.value_network.save(temp_value_path)
+            cpu_agent.value_network_path = temp_value_path
+            cpu_agent.value_network = None
+            
+        return cpu_agent
+    
+    def evaluate_agent_worker(self, agent_data, num_games, result_queue):
+        """Worker process for agent evaluation."""
+        try:
+            # Set device to CPU for worker processes
+            device = torch.device("cpu")
+            
+            # Recreate the agent if we have a simplified version
+            if hasattr(agent_data, 'policy_network_path'):
+                # This is a CPU-compatible version, load the actual networks
+                from models.policy_network import PolicyNetwork
+                from models.value_network import ValueNetwork
+                
+                policy_network = None
+                if agent_data.policy_network_path:
+                    policy_network = PolicyNetwork.load(agent_data.policy_network_path, device=device)
+                
+                value_network = None
+                if agent_data.value_network_path:
+                    value_network = ValueNetwork.load(agent_data.value_network_path, device=device)
+                
+                # Recreate the agent with loaded networks
+                agent = NeuralAgent(
+                    policy_network=policy_network,
+                    value_network=value_network,
+                    name=agent_data.name,
+                    exploration_rate=agent_data.exploration_rate,
+                    device=device
+                )
+                agent.set_player_index(agent_data.player_idx)
+            else:
+                # This is a normal agent, just use it directly
+                agent = agent_data
+            
+            # Create default opponents (random agents)
             opponents = [
                 RandomAgent(name=f"Random-{i}", aggression=np.random.uniform(0.3, 0.7))
                 for i in range(self.config.NUM_PLAYERS - 1)
             ]
-        
-        # Set up environment
-        env = PokerEnvironment(
-            num_players=self.config.NUM_PLAYERS,
-            starting_stack=self.config.STARTING_STACK,
-            small_blind=self.config.SMALL_BLIND,
-            big_blind=self.config.BIG_BLIND,
-            max_rounds=num_games,
-            action_timeout=self.config.ACTION_TIMEOUT
-        )
-        
-        # Assign player indices
-        agent.set_player_index(0)
-        for i, opponent in enumerate(opponents):
-            opponent.set_player_index(i + 1)
-        
-        # Reset environment
-        state = env.reset()
-        done = False
-        
-        # Play games
-        while not done:
-            # Get current player
-            current_player_idx = state.get_current_player()
             
-            # Get valid actions
-            valid_actions = env.get_valid_actions(current_player_idx)
-            valid_amounts = env.get_valid_bet_amounts(current_player_idx)
+            # Set up environment
+            env = PokerEnvironment(
+                num_players=self.config.NUM_PLAYERS,
+                starting_stack=self.config.STARTING_STACK,
+                small_blind=self.config.SMALL_BLIND,
+                big_blind=self.config.BIG_BLIND,
+                max_rounds=num_games,
+                action_timeout=self.config.ACTION_TIMEOUT
+            )
             
-            # Get agent for current player
-            current_agent = agent if current_player_idx == 0 else opponents[current_player_idx - 1]
+            # Assign player indices
+            agent.set_player_index(0)
+            for i, opponent in enumerate(opponents):
+                opponent.set_player_index(i + 1)
             
-            # Get action from agent
-            action_type, bet_amount = current_agent.act(state, valid_actions, valid_amounts)
+            # Reset environment
+            state = env.reset()
+            done = False
             
-            # Execute action
-            next_state, reward, done, info = env.step(current_player_idx, action_type, bet_amount)
+            # Play games
+            while not done:
+                # Get current player
+                current_player_idx = state.get_current_player()
+                
+                # Get valid actions
+                valid_actions = env.get_valid_actions(current_player_idx)
+                valid_amounts = env.get_valid_bet_amounts(current_player_idx)
+                
+                # Get agent for current player
+                current_agent = agent if current_player_idx == 0 else opponents[current_player_idx - 1]
+                
+                # Get action from agent
+                action_type, bet_amount = current_agent.act(state, valid_actions, valid_amounts)
+                
+                # Execute action
+                next_state, reward, done, info = env.step(current_player_idx, action_type, bet_amount)
+                
+                # Let agent observe the result
+                current_agent.observe(state, (action_type, bet_amount), reward, next_state, done)
+                
+                # Update state
+                state = next_state
             
-            # Let agent observe the result
-            current_agent.observe(state, (action_type, bet_amount), reward, next_state, done)
+            # Calculate fitness (agent's profit per hand)
+            agent_stats = agent.get_stats()
+            hands_played = max(1, agent_stats.get("hands_played", 1))
+            total_reward = agent_stats.get("total_reward", 0.0)
             
-            # Update state
-            state = next_state
-        
-        # Calculate fitness (agent's profit per hand)
-        agent_stats = agent.get_stats()
-        hands_played = max(1, agent_stats.get("hands_played", 1))
-        total_reward = agent_stats.get("total_reward", 0.0)
-        
-        fitness = total_reward / hands_played
-        
-        return fitness
+            fitness = total_reward / hands_played
+            
+            # Put result in the queue
+            result_queue.put((agent_data.player_idx if hasattr(agent_data, 'player_idx') else 0, fitness))
+            
+            # Clean up temporary files if used
+            if hasattr(agent_data, 'policy_network_path') and agent_data.policy_network_path:
+                if os.path.exists(agent_data.policy_network_path):
+                    os.remove(agent_data.policy_network_path)
+                    
+            if hasattr(agent_data, 'value_network_path') and agent_data.value_network_path:
+                if os.path.exists(agent_data.value_network_path):
+                    os.remove(agent_data.value_network_path)
+                    
+        except Exception as e:
+            # Log error and return a default fitness value
+            print(f"Error in evaluation worker: {str(e)}")
+            result_queue.put((agent_data.player_idx if hasattr(agent_data, 'player_idx') else 0, -1000.0))
     
     def evaluate_population_parallel(self, num_games: int = 100) -> List[float]:
         """
-        Evaluate the entire population in parallel.
+        Evaluate the entire population with GPU operations in main thread only.
+        Worker processes use CPU only to prevent CUDA/file handle issues.
         
         Args:
             num_games: Number of games for each evaluation
@@ -170,28 +227,59 @@ class Trainer:
         Returns:
             List of fitness scores
         """
-        # Create a pool of worker processes
-        with mp.Pool(processes=self.num_workers) as pool:
-            # Prepare evaluation arguments for each agent
-            eval_args = [(agent, num_games) for agent in self.population.population]
-            
-            # Evaluate agents in parallel
-            fitness_scores = pool.starmap(self._evaluate_agent_wrapper, eval_args)
+        fitness_scores = [0.0] * len(self.population.population)
+        
+        if self.use_cpu_for_eval:
+            # If using GPU, create CPU-compatible copies for workers
+            cpu_agents = [self._cpu_compatible_agent(agent) for agent in self.population.population]
+            for i, agent in enumerate(cpu_agents):
+                agent.player_idx = i  # Set index for tracking results
+        else:
+            # If already on CPU, just use the agents directly
+            cpu_agents = self.population.population
+            for i, agent in enumerate(cpu_agents):
+                agent.set_player_index(i)
+        
+        # Create a queue for results
+        result_queue = mp.Queue()
+        
+        # Create worker processes
+        processes = []
+        for i, agent in enumerate(cpu_agents):
+            p = mp.Process(
+                target=self.evaluate_agent_worker,
+                args=(agent, num_games, result_queue)
+            )
+            processes.append(p)
+            p.start()
+        
+        # Collect results
+        results_collected = 0
+        with tqdm(total=len(cpu_agents), desc="Evaluating agents") as pbar:
+            while results_collected < len(cpu_agents):
+                if not result_queue.empty():
+                    idx, fitness = result_queue.get()
+                    fitness_scores[idx] = fitness
+                    results_collected += 1
+                    pbar.update(1)
+                else:
+                    time.sleep(0.1)
+        
+        # Wait for all processes to finish
+        for p in processes:
+            p.join()
+        
+        # Clean up
+        for p in processes:
+            if p.is_alive():
+                p.terminate()
+        
+        # Force garbage collection
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         return fitness_scores
-    
-    def _evaluate_agent_wrapper(self, agent: BaseAgent, num_games: int) -> float:
-        """
-        Wrapper function for parallel evaluation.
-        
-        Args:
-            agent: Agent to evaluate
-            num_games: Number of games to play
-            
-        Returns:
-            Fitness score
-        """
-        return self.evaluate_agent(agent, num_games)
     
     def train(
         self,
@@ -272,7 +360,8 @@ class Trainer:
                 
                 # Force garbage collection
                 gc.collect()
-                torch.cuda.empty_cache()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             
             # Save checkpoint periodically
             if generation % checkpoint_frequency == 0 or generation == num_generations - 1:
@@ -410,9 +499,24 @@ class Trainer:
                     )
                     opponents.append(agent_copy)
         
-        # Run evaluation
-        self.logger.info(f"Testing best agent over {num_games} games")
-        fitness = self.evaluate_agent(best_agent, num_games=num_games, opponents=opponents)
+        # Create a queue for results
+        result_queue = mp.Queue()
+        
+        # Create a CPU-compatible copy of the best agent
+        cpu_agent = self._cpu_compatible_agent(best_agent) if self.use_cpu_for_eval else best_agent
+        cpu_agent.player_idx = 0
+        
+        # Test in a separate process
+        p = mp.Process(
+            target=self.evaluate_agent_worker,
+            args=(cpu_agent, num_games, result_queue)
+        )
+        p.start()
+        
+        # Get result
+        self.logger.info(f"Testing best agent over {num_games} games...")
+        idx, fitness = result_queue.get()
+        p.join()
         
         # Get agent stats
         stats = best_agent.get_stats()
