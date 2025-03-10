@@ -151,6 +151,9 @@ class Trainer:
                         checkpoint = torch.load(agent_data.value_network_path, map_location=device)
                         architecture = checkpoint.get('architecture', {})
                         
+                        if 'output_size' in architecture:
+                            del architecture['output_size']
+
                         value_network = ValueNetwork(
                             input_size=architecture.get('input_size', 520),
                             hidden_layers=architecture.get('hidden_layers', [512, 256, 128, 64]),

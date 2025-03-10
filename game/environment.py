@@ -54,10 +54,12 @@ class PokerEnvironment:
             Initial game state
         """
         # Initialize pokerkit game
-        self.game = pokerkit.FixedLimitTexasHoldem(
-            num_players=self.num_players,
+        self.game = pokerkit.Holdem(
+            variant=pokerkit.Limit(),  # Or whichever variant you need
+            num_seats=self.num_players,
             starting_stacks=[self.starting_stack] * self.num_players,
-            blinds=[self.small_blind, self.big_blind]
+            small_blind=self.small_blind,
+            big_blind=self.big_blind
         )
         
         # Set up game state tracking
