@@ -109,7 +109,33 @@ class Trainer:
             cpu_agent.value_network = None
             
         return cpu_agent
-    
+
+    def create_value_network_for_worker(checkpoint_path, device):
+        """Create a value network from checkpoint, avoiding any parameter issues."""
+        try:
+            # Load the checkpoint
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            
+            # Create a new ValueNetwork with just the essential parameters
+            from models.value_network import ValueNetwork
+            
+            # Explicitly create with only the params ValueNetwork accepts
+            network = ValueNetwork(
+                input_size=520,  # Default value
+                hidden_layers=[512, 256, 128, 64],  # Default value
+                learning_rate=0.0001,  # Default value
+                device=device
+            )
+            
+            # Load the state dict manually
+            if 'model_state_dict' in checkpoint:
+                network.load_state_dict(checkpoint['model_state_dict'])
+            
+            return network
+        except Exception as e:
+            print(f"Failed to create ValueNetwork: {e}")
+            return None
+
     def evaluate_agent_worker(self, agent_data, num_games, result_queue):
         """Worker process for agent evaluation."""
         try:
@@ -158,12 +184,7 @@ class Trainer:
                                 clean_args[key] = value
                         
                         # Create with cleaned arguments
-                        value_network = ValueNetwork(
-                            input_size=clean_args.get('input_size', 520),
-                            hidden_layers=clean_args.get('hidden_layers', [512, 256, 128, 64]),
-                            learning_rate=clean_args.get('learning_rate', 0.0001),
-                            device=device
-                        )
+                        value_network = create_value_network_for_worker(agent_data.value_network_path, device)
                         value_network.load_state_dict(checkpoint['model_state_dict'])
                 
                 # Recreate the agent with loaded networks

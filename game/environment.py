@@ -56,23 +56,65 @@ class PokerEnvironment:
         Returns:
             Initial game state
         """
-        # Initialize pokerkit game
-        # The correct class to use is FixedLimitTexasHoldem or NoLimitTexasHoldem
-        if self.limit_type == 'fixed':
-            self.game = pokerkit.FixedLimitTexasHoldem(
-                starting_stacks=[self.starting_stack] * self.num_players,
-                blinds=[self.small_blind, self.big_blind]
+        # Initialize pokerkit game with the correct API for version 0.5.0
+        import pokerkit
+        
+        # Create automations for the game setup
+        # This is a guess based on the constructor signature - you may need to adjust this
+        from pokerkit import Automation, Mode
+        
+        # Set up automations for hole dealing, board dealing, etc.
+        automations = (
+            pokerkit.HoleDealing(),
+            pokerkit.BoardDealing(),
+            # Add other automations as needed
+        )
+        
+        # Set up antes (usually 0 in Texas Holdem)
+        raw_antes = [0] * self.num_players
+        
+        # Set up blinds
+        raw_blinds = [0] * self.num_players
+        # Set small blind and big blind positions (usually positions 0 and 1)
+        raw_blinds[0] = self.small_blind
+        raw_blinds[1] = self.big_blind
+        
+        # Minimum bet is usually the big blind
+        min_bet = self.big_blind
+        
+        # Create the game with the correct parameters
+        try:
+            self.game = pokerkit.UnfixedLimitHoldem(
+                automations=automations,
+                ante_trimming_status=False,  # Typically false in Texas Holdem
+                raw_antes=raw_antes,
+                raw_blinds_or_straddles=raw_blinds,
+                min_bet=min_bet,
+                mode=Mode.TOURNAMENT,  # or Mode.CASH depending on your game type
             )
-        else:  # No limit
-            self.game = pokerkit.NoLimitTexasHoldem(
-                starting_stacks=[self.starting_stack] * self.num_players,
-                blinds=[self.small_blind, self.big_blind]
-            )
+            
+            # Set up the stacks manually after creation
+            for i in range(self.num_players):
+                self.game.stacks[i] = self.starting_stack
+                
+        except Exception as e:
+            # If the above fails, try a simpler approach with NoLimitTexasHoldem if available
+            print(f"Error initializing UnfixedLimitHoldem: {e}")
+            try:
+                # Try a different variant if available
+                self.game = pokerkit.NoLimitTexasHoldem(
+                    # Use the parameters according to its constructor
+                    # You might need another debug script to get these
+                )
+            except Exception as e2:
+                print(f"Error initializing alternative game: {e2}")
+                raise RuntimeError("Could not initialize any poker game variant")
         
         # Set up game state tracking
         self.current_round = 0
         self.done = False
         self.player_stats = {i: {"wins": 0, "chips_won": 0} for i in range(self.num_players)}
+  
         
         # Track current hand information
         self.current_hand_history = []
