@@ -31,7 +31,7 @@ class PokerConfig:
     # Game settings
     SMALL_BLIND = 5
     BIG_BLIND = 10
-    INITIAL_CHIPS = 1000
+    INITIAL_CHIPS = 100
     MAX_RAISES_PER_ROUND = 4
     TIMEOUT_SECONDS = 5  # Timeout for betting decisions
     
@@ -63,8 +63,8 @@ class PokerConfig:
     DROPOUT_RATE = 0.2
     
     # Evolutionary algorithm settings
-    POPULATION_SIZE = 50
-    GENERATIONS = 100
+    POPULATION_SIZE = 200
+    GENERATIONS = 1000
     ELITE_PERCENTAGE = 0.1  # Top percentage to keep unchanged
     MUTATION_RATE = 0.1
     CROSSOVER_RATE = 0.7
