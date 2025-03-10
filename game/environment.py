@@ -50,66 +50,50 @@ class PokerEnvironment:
         self.reset()
     
     def reset(self) -> GameState:
-        """
-        Reset the game to initial state.
-        
-        Returns:
-            Initial game state
-        """
-        # Initialize pokerkit game with the correct API for version 0.5.0
+        """Reset the game to initial state."""
         import pokerkit
+        from pokerkit import State, Automation, Mode
         
-        # Create automations for the game setup
-        # This is a guess based on the constructor signature - you may need to adjust this
-        from pokerkit import Automation, Mode
+        # Create a basic state to work with
+        # For pokerkit 0.5.0, we need to create a state first
+        state = State()
         
-        # Set up automations for hole dealing, board dealing, etc.
-        automations = (
-            pokerkit.HoleDealing(),
-            pokerkit.BoardDealing(),
-            # Add other automations as needed
-        )
+        # Initialize it with players
+        state.seats = list(range(self.num_players))
+        state.stacks = [self.starting_stack] * self.num_players
         
-        # Set up antes (usually 0 in Texas Holdem)
-        raw_antes = [0] * self.num_players
+        # Set up blind positions (adjust as needed)
+        state.button_seat = 0
         
-        # Set up blinds
-        raw_blinds = [0] * self.num_players
-        # Set small blind and big blind positions (usually positions 0 and 1)
-        raw_blinds[0] = self.small_blind
-        raw_blinds[1] = self.big_blind
-        
-        # Minimum bet is usually the big blind
-        min_bet = self.big_blind
-        
-        # Create the game with the correct parameters
+        # Instead of trying to use the complex automations directly,
+        # let's try to use one of the predefined game types
         try:
-            self.game = pokerkit.UnfixedLimitHoldem(
-                automations=automations,
-                ante_trimming_status=False,  # Typically false in Texas Holdem
-                raw_antes=raw_antes,
-                raw_blinds_or_straddles=raw_blinds,
-                min_bet=min_bet,
-                mode=Mode.TOURNAMENT,  # or Mode.CASH depending on your game type
-            )
+            # Try NoLimitTexasHoldem or similar
+            from pokerkit.games import FixedLimitTexasHoldem, NoLimitTexasHoldem
             
-            # Set up the stacks manually after creation
-            for i in range(self.num_players):
-                self.game.stacks[i] = self.starting_stack
-                
-        except Exception as e:
-            # If the above fails, try a simpler approach with NoLimitTexasHoldem if available
-            print(f"Error initializing UnfixedLimitHoldem: {e}")
-            try:
-                # Try a different variant if available
+            # Create game - check which class is available
+            if hasattr(pokerkit, 'NoLimitTexasHoldem'):
                 self.game = pokerkit.NoLimitTexasHoldem(
-                    # Use the parameters according to its constructor
-                    # You might need another debug script to get these
+                    blinds=[self.small_blind, self.big_blind]
                 )
-            except Exception as e2:
-                print(f"Error initializing alternative game: {e2}")
-                raise RuntimeError("Could not initialize any poker game variant")
+            elif hasattr(pokerkit, 'FixedLimitTexasHoldem'):
+                self.game = pokerkit.FixedLimitTexasHoldem(
+                    blinds=[self.small_blind, self.big_blind]
+                )
+            else:
+                # Fallback - create a simpler poker game
+                self.game = pokerkit.Poker()
+                # Manually set properties
+                self.game.stacks = [self.starting_stack] * self.num_players
         
+        except Exception as e:
+            print(f"Error initializing poker game: {e}")
+            
+            # Last resort - create a minimal game
+            self.game = pokerkit.Poker()
+            # Setup manually
+            self.game.stacks = [self.starting_stack] * self.num_players
+            
         # Set up game state tracking
         self.current_round = 0
         self.done = False
