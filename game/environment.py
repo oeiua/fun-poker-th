@@ -23,7 +23,8 @@ class PokerEnvironment:
         small_blind: int = 50,
         big_blind: int = 100,
         max_rounds: int = 1000,
-        action_timeout: int = 30
+        action_timeout: int = 30,
+        limit_type: str = 'no'  # 'fixed' or 'no'
     ):
         """
         Initialize the poker environment.
@@ -35,6 +36,7 @@ class PokerEnvironment:
             big_blind: Big blind amount
             max_rounds: Maximum number of rounds to play
             action_timeout: Timeout for actions in seconds
+            limit_type: Type of limit ('fixed' or 'no')
         """
         self.num_players = num_players
         self.starting_stack = starting_stack
@@ -42,6 +44,7 @@ class PokerEnvironment:
         self.big_blind = big_blind
         self.max_rounds = max_rounds
         self.action_timeout = action_timeout
+        self.limit_type = limit_type.lower()
         
         # Initialize game
         self.reset()
@@ -54,15 +57,17 @@ class PokerEnvironment:
             Initial game state
         """
         # Initialize pokerkit game
-        # Import pokerkit's specific classes
-        from pokerkit import Poker, NoLimitTexasHoldem
-        
-        # Create the game using the correct constructor
-        self.game = NoLimitTexasHoldem(
-            stack_sizes=[self.starting_stack] * self.num_players,
-            small_blind=self.small_blind,
-            big_blind=self.big_blind
-        )
+        # The correct class to use is FixedLimitTexasHoldem or NoLimitTexasHoldem
+        if self.limit_type == 'fixed':
+            self.game = pokerkit.FixedLimitTexasHoldem(
+                starting_stacks=[self.starting_stack] * self.num_players,
+                blinds=[self.small_blind, self.big_blind]
+            )
+        else:  # No limit
+            self.game = pokerkit.NoLimitTexasHoldem(
+                starting_stacks=[self.starting_stack] * self.num_players,
+                blinds=[self.small_blind, self.big_blind]
+            )
         
         # Set up game state tracking
         self.current_round = 0

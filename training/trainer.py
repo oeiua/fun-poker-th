@@ -147,19 +147,23 @@ class Trainer:
                         value_network = ValueNetwork.load(agent_data.value_network_path, device=device)
                     except Exception as e:
                         print(f"Error loading value network: {str(e)}")
-                        # Try loading with a direct approach - remove output_size
+                        # Load manually without output_size
                         checkpoint = torch.load(agent_data.value_network_path, map_location=device)
                         architecture = checkpoint.get('architecture', {})
                         
-                        # Create without using the architecture dictionary directly
+                        # Create a clean copy without output_size
+                        clean_args = {}
+                        for key, value in architecture.items():
+                            if key != 'output_size':
+                                clean_args[key] = value
+                        
+                        # Create with cleaned arguments
                         value_network = ValueNetwork(
-                            input_size=architecture.get('input_size', 520),
-                            hidden_layers=architecture.get('hidden_layers', [512, 256, 128, 64]),
-                            learning_rate=architecture.get('learning_rate', 0.0001),
+                            input_size=clean_args.get('input_size', 520),
+                            hidden_layers=clean_args.get('hidden_layers', [512, 256, 128, 64]),
+                            learning_rate=clean_args.get('learning_rate', 0.0001),
                             device=device
                         )
-                        
-                        # Now load the state dict
                         value_network.load_state_dict(checkpoint['model_state_dict'])
                 
                 # Recreate the agent with loaded networks
