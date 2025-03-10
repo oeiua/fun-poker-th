@@ -54,10 +54,12 @@ class PokerEnvironment:
             Initial game state
         """
         # Initialize pokerkit game
-        self.game = pokerkit.Holdem(
-            variant=pokerkit.Limit(),  # Or whichever variant you need
-            num_seats=self.num_players,
-            starting_stacks=[self.starting_stack] * self.num_players,
+        # Import pokerkit's specific classes
+        from pokerkit import Poker, NoLimitTexasHoldem
+        
+        # Create the game using the correct constructor
+        self.game = NoLimitTexasHoldem(
+            stack_sizes=[self.starting_stack] * self.num_players,
             small_blind=self.small_blind,
             big_blind=self.big_blind
         )
