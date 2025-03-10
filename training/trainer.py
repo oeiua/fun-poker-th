@@ -400,7 +400,10 @@ class Trainer:
             # Calculate elapsed time
             gen_elapsed = time.time() - gen_start_time
             total_elapsed = time.time() - start_time
-            remaining = (total_elapsed / (generation + 1 - self.current_generation)) * (num_generations - generation - 1)
+            if generation > self.current_generation:
+                remaining = (total_elapsed / (generation - self.current_generation)) * (num_generations - generation)
+            else:
+                remaining = 0.0  # No time estimate for first generation
             
             self.logger.info(f"Generation {generation} completed in {gen_elapsed:.1f}s")
             self.logger.info(f"Avg fitness: {avg_fitness:.2f}, Max: {max_fitness:.2f}, Min: {min_fitness:.2f}")
