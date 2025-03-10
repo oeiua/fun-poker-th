@@ -44,7 +44,7 @@ class NNAgent(BaseAgent):
             Tuple of (action_type, amount)
         """
         # Convert state to a tensor
-        state_tensor = tf.convert_to_tensor(state.to_input_tensor())
+        state_tensor = tf.convert_to_tensor(state.to_input_tensor(), dtype=tf.float32)
         state_tensor = tf.expand_dims(state_tensor, 0)  # Add batch dimension
         
         # Epsilon-greedy exploration
@@ -173,7 +173,7 @@ class NNAgent(BaseAgent):
                 True
             )
     
-    def train(self, batch_size: int = None) -> float:
+    def train(self, batch_size: Optional[int] = None) -> float:
         """
         Train the model on a batch of experiences.
         

@@ -29,7 +29,7 @@ def setup_resources(config: Dict[str, Any]) -> None:
     if cpu_threads == -1:
         cpu_threads = multiprocessing.cpu_count()
     
-    # Set number of inter/intra threads
+    # Configure TensorFlow thread settings
     tf.config.threading.set_inter_op_parallelism_threads(cpu_threads)
     tf.config.threading.set_intra_op_parallelism_threads(cpu_threads)
     
@@ -87,10 +87,13 @@ def setup_resources(config: Dict[str, Any]) -> None:
     if memory_limit_gb:
         if platform.system() == 'Linux':
             # On Linux, use resource module to limit memory
-            import resource
-            memory_limit_bytes = memory_limit_gb * 1024 * 1024 * 1024  # Convert GB to bytes
-            resource.setrlimit(resource.RLIMIT_AS, (memory_limit_bytes, memory_limit_bytes))
-            logging.info(f"Process memory limit set to {memory_limit_gb} GB")
+            try:
+                import resource
+                memory_limit_bytes = memory_limit_gb * 1024 * 1024 * 1024  # Convert GB to bytes
+                resource.setrlimit(resource.RLIMIT_AS, (memory_limit_bytes, memory_limit_bytes))
+                logging.info(f"Process memory limit set to {memory_limit_gb} GB")
+            except ImportError:
+                logging.warning("Failed to import resource module for memory limiting")
         else:
             logging.warning(f"Memory limit of {memory_limit_gb} GB requested, but not supported on {platform.system()}")
     
