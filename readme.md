@@ -1,125 +1,124 @@
-# Evolutionary Poker AI
+# Evolutionary Neural Network Poker AI
 
-A comprehensive poker AI system using Python, TensorFlow, and evolutionary algorithms to simulate Texas Hold'em games with neural networks. The AI models compete against each other and improve strategies over time through evolutionary learning.
+This project implements a comprehensive poker AI system using evolutionary algorithms and neural networks to learn optimal Texas Hold'em strategies. The system uses the `pokerkit` library for game mechanics and implements an evolutionary training approach where neural networks compete against each other and evolve over generations.
 
 ## Features
 
-- **Neural Network AI**: Uses TensorFlow to make betting decisions based on game state
-- **Evolutionary Training**: Models improve over generations through selection, crossover, and mutation
-- **Complete Game Logic**: Implements full Texas Hold'em rules with proper betting rounds
-- **Interactive Play**: Human players can compete against trained AI models
-- **Visualization Tools**: Monitor training progress and game results with visual analytics
+- **Neural Network Decision Making**: Modern neural networks make strategic poker decisions
+- **Evolutionary Training**: Populations of agents evolve through selection, crossover, and mutation
+- **Multi-Agent Competition**: Agents compete against each other to improve strategies
+- **Resource Optimization**: Efficient CPU/GPU utilization for faster training
+- **Progress Monitoring**: Detailed training visualizations and metrics
+- **Checkpointing**: Save and resume training from checkpoints
+- **Human vs AI Play**: Play against the trained AI
+- **Configurable**: All important parameters easily adjustable through YAML configuration
+
+## Requirements
+
+- python3 3.8+
+- TensorFlow 2.x
+- pokerkit 0.5.0+
+- Other dependencies listed in `requirements.txt`
+
+## Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/poker-ai.git
+cd poker-ai
+```
+
+2. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+## Usage
+
+### Configuration
+
+Edit the `config/config.yaml` file to adjust parameters for:
+- Game mechanics (blinds, stacks, etc.)
+- Neural network architecture
+- Training parameters
+- Resource usage
+
+### Training
+
+Train the AI using the following command:
+
+```bash
+python3 main.py --mode train --config config/config.yaml
+```
+
+To continue training from a checkpoint:
+
+```bash
+python3 main.py --mode train --config config/config.yaml --checkpoint checkpoints/generation_50
+```
+
+### Playing Against the AI
+
+Play against the trained AI:
+
+```bash
+python3 main.py --mode play --config config/config.yaml --checkpoint checkpoints/final
+```
+
+### Evaluation
+
+Evaluate the performance of a trained model:
+
+```bash
+python3 main.py --mode evaluate --config config/config.yaml --checkpoint checkpoints/final
+```
 
 ## Project Structure
 
 ```
-.
-├── main.py                  # Entry point for the application
-├── config.py                # Configuration settings and game constants
-├── card.py                  # Card and deck classes
-├── evaluator.py             # Poker hand evaluation functionality
-├── model.py                 # Neural network model for the AI
-├── player.py                # Player classes (human and AI)
-├── game_engine.py           # Core game management and rules
-├── evolutionary_trainer.py  # Evolutionary algorithm implementation
-├── visualizer.py            # Training and game visualization tools
-├── utils.py                 # Utility functions
-├── models/                  # Directory for saved models
-├── logs/                    # Training logs and checkpoints
-└── README.md                # This documentation file
+poker_ai/
+├── config/
+│   └── config.yaml         # Configuration file
+├── src/
+│   ├── agent/              # Agent implementations
+│   ├── environment/        # Game environment
+│   ├── models/             # Neural network models
+│   ├── training/           # Training components
+│   ├── utils/              # Utility functions
+│   └── main.py             # Entry point
+├── checkpoints/            # Saved models
+├── logs/                   # Training logs
+└── README.md               # This file
 ```
 
-## Technical Details
+## Training Methodology
 
-### Neural Network Architecture
+The AI is trained using a combination of evolutionary algorithms and reinforcement learning:
 
-The AI uses a neural network with the following input features:
-- Player position and chip state
-- Hole cards and community cards
-- Pot size and current bet
-- Game phase (pre-flop, flop, turn, river)
-- Number of active players
+1. **Initialization**: Create a population of randomly initialized neural networks
+2. **Evaluation**: Agents play poker against each other to determine fitness
+3. **Selection**: Higher-performing agents are more likely to be selected for reproduction
+4. **Crossover**: Combine weights from two parent networks to create offspring
+5. **Mutation**: Randomly modify weights to explore new strategies
+6. **Iteration**: Repeat the process over many generations
 
-The output layer produces action probabilities for:
-- Fold
-- Check
-- Call
-- Bet
-- Raise
-- All-in
+This approach allows the AI to discover effective poker strategies without human guidance or labeled training data.
 
-### Evolutionary Algorithm
+## Neural Network Architecture
 
-The training process uses:
-- Tournament selection for parent selection
-- Elitism to preserve the best models
-- Crossover between successful models
-- Mutation to explore new strategies
-- Fitness evaluation based on tournament performance
+The neural network takes the game state as input (including cards, pot size, player stacks, etc.) and outputs action values for folding, checking/calling, and betting/raising. The architecture includes:
 
-## Usage
-
-### Installation
-
-1. Clone the repository
-2. Install dependencies:
-```bash
-python3 -m venv poker_env
-pip install -r requirements.txt
-```
-
-### Training the AI
-
-```bash
-python3 main.py --mode train --generations 100 --population 50
-```
-
-Training parameters:
-- `--generations`: Number of generations for evolutionary training
-- `--population`: Population size
-- `--games`: Number of games per evaluation
-- `--verbose`: Enable detailed output
-- `--checkpoint`: Continue training from checkpoint
-
-### Playing Against the AI
-
-```bash
-python3 main.py --mode play --num_players 10
-```
-
-Play parameters:
-- `--num_players`: Total number of players (including human)
-- `--initial_chips`: Starting chips for each player
-- `--model_path`: Path to load trained models
-
-### Evaluating Models
-
-```bash
-python3 main.py --mode evaluate --games 100
-```
-
-Evaluation parameters:
-- `--games`: Number of games to evaluate
-- `--verbose`: Show detailed results
-
-## Game Rules
-
-The implementation follows standard Texas Hold'em rules:
-
-1. **Pre-flop**: Each player receives two hole cards, betting starts left of big blind
-2. **Flop**: Three community cards are dealt, betting starts left of dealer
-3. **Turn**: Fourth community card is dealt, another betting round
-4. **River**: Final community card is dealt, final betting round
-5. **Showdown**: Best five-card hand wins the pot
-
-## Future Improvements
-
-- Implement multi-table tournaments
-- Add support for different poker variants
-- Incorporate reinforcement learning techniques
-- Create a web-based interface for human players
-- Implement player profiling for adaptive strategies
+- Input layer for game state features
+- Multiple hidden layers with ReLU activation
+- Output layer for action values
+- Dropout for regularization
+- Batch normalization for stable training
 
 ## License
 
-This project is available under the MIT License. See LICENSE file for details.
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Acknowledgments
+
+- [pokerkit](https://github.com/uoftcprg/pokerkit) for poker game mechanics
+- TensorFlow team for the deep learning framework
