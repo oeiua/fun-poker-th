@@ -271,18 +271,34 @@ class Population:
         for key in new_state_dict:
             # Crossover
             if np.random.random() < crossover_rate:
-                # Randomly choose which parent to inherit each parameter from
-                mask = torch.rand_like(new_state_dict[key]) < 0.5
-                new_state_dict[key] = torch.where(mask, state_dict1[key], state_dict2[key])
+                # Handle different tensor types appropriately
+                tensor = new_state_dict[key]
+                if tensor.dtype == torch.long or tensor.dtype == torch.int64 or tensor.dtype == torch.int32:
+                    # For integer tensors, use a numpy-based approach
+                    mask = (np.random.rand(*tensor.shape) < 0.5)
+                    tensor1 = state_dict1[key].cpu().numpy()
+                    tensor2 = state_dict2[key].cpu().numpy()
+                    result = np.where(mask, tensor1, tensor2)
+                    new_state_dict[key] = torch.tensor(result, dtype=tensor.dtype, device=tensor.device)
+                else:
+                    # For float tensors, use the PyTorch approach
+                    mask = torch.rand_like(tensor, dtype=torch.float) < 0.5
+                    new_state_dict[key] = torch.where(mask, state_dict1[key], state_dict2[key])
             else:
                 # No crossover, just inherit from first parent
                 new_state_dict[key] = state_dict1[key].clone()
             
             # Mutation
             if np.random.random() < mutation_rate:
-                # Apply random noise to parameters
-                noise = torch.randn_like(new_state_dict[key]) * 0.1
-                new_state_dict[key] += noise
+                tensor = new_state_dict[key]
+                if tensor.dtype == torch.long or tensor.dtype == torch.int64 or tensor.dtype == torch.int32:
+                    # For integer tensors, add small integer noise
+                    noise = torch.randint_like(tensor, low=-1, high=2)  # -1, 0, or 1
+                    new_state_dict[key] = torch.clamp(tensor + noise, min=0)  # Ensure non-negative
+                else:
+                    # For float tensors, add normal noise
+                    noise = torch.randn_like(tensor) * 0.1
+                    new_state_dict[key] += noise
         
         # Load the new state dictionary
         new_network.load_state_dict(new_state_dict)
