@@ -130,6 +130,26 @@ class Trainer:
         
         return network
 
+    def create_clean_value_network(self, checkpoint_path, device):
+        """
+        Create a value network without using any parameters from the checkpoint.
+        """
+        # Just create a new network with default parameters
+        from models.value_network import ValueNetwork
+        network = ValueNetwork(
+            input_size=520,
+            hidden_layers=[512, 256, 128, 64],
+            learning_rate=0.0001,
+            device=device
+        )
+        
+        # Load the state dictionary manually, avoiding architecture info
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        if 'model_state_dict' in checkpoint:
+            network.load_state_dict(checkpoint['model_state_dict'])
+        
+        return network
+
     def evaluate_agent_worker(self, agent_data, num_games, result_queue):
         """Worker process for agent evaluation."""
         try:
@@ -158,7 +178,7 @@ class Trainer:
                             output_size=architecture.get('output_size', 3),
                             learning_rate=architecture.get('learning_rate', 0.0001),
                             device=device
-                        )
+                        value_network = self.create_clean_value_network(agent_data.value_network_path, device)
                         policy_network.load_state_dict(checkpoint['model_state_dict'])
                 
                 value_network = None
