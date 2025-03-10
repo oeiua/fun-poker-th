@@ -123,12 +123,41 @@ class Trainer:
                 from models.value_network import ValueNetwork
                 
                 policy_network = None
-                if agent_data.policy_network_path:
-                    policy_network = PolicyNetwork.load(agent_data.policy_network_path, device=device)
+                if agent_data.policy_network_path and os.path.exists(agent_data.policy_network_path):
+                    try:
+                        policy_network = PolicyNetwork.load(agent_data.policy_network_path, device=device)
+                    except Exception as e:
+                        print(f"Error loading policy network: {str(e)}")
+                        # Try loading with a direct approach
+                        checkpoint = torch.load(agent_data.policy_network_path, map_location=device)
+                        architecture = checkpoint.get('architecture', {})
+                        
+                        policy_network = PolicyNetwork(
+                            input_size=architecture.get('input_size', 520),
+                            hidden_layers=architecture.get('hidden_layers', [512, 256, 128, 64]),
+                            output_size=architecture.get('output_size', 3),
+                            learning_rate=architecture.get('learning_rate', 0.0001),
+                            device=device
+                        )
+                        policy_network.load_state_dict(checkpoint['model_state_dict'])
                 
                 value_network = None
-                if agent_data.value_network_path:
-                    value_network = ValueNetwork.load(agent_data.value_network_path, device=device)
+                if agent_data.value_network_path and os.path.exists(agent_data.value_network_path):
+                    try:
+                        value_network = ValueNetwork.load(agent_data.value_network_path, device=device)
+                    except Exception as e:
+                        print(f"Error loading value network: {str(e)}")
+                        # Try loading with a direct approach - NOTE: ValueNetwork doesn't use output_size
+                        checkpoint = torch.load(agent_data.value_network_path, map_location=device)
+                        architecture = checkpoint.get('architecture', {})
+                        
+                        value_network = ValueNetwork(
+                            input_size=architecture.get('input_size', 520),
+                            hidden_layers=architecture.get('hidden_layers', [512, 256, 128, 64]),
+                            learning_rate=architecture.get('learning_rate', 0.0001),
+                            device=device
+                        )
+                        value_network.load_state_dict(checkpoint['model_state_dict'])
                 
                 # Recreate the agent with loaded networks
                 agent = NeuralAgent(
