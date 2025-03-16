@@ -4,7 +4,7 @@ __pycache__/
 *$py.class
 
 logs/
-poker_env/
+poker_data/
 
 # C extensions
 *.so

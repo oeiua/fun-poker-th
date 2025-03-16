@@ -386,79 +386,6 @@ class PokerScreenGrabber:
             logger.info(f"Screenshot saved to {filepath}")
         except Exception as e:
             logger.error(f"Error saving screenshot: {str(e)}")
-    
-    def create_mock_screenshot(self):
-        """
-        Create a mock screenshot based on the provided PokerTH screenshot
-        
-        Returns:
-            numpy.ndarray: Mock screenshot
-        """
-        try:
-            logger.info("Creating mock screenshot")
-            
-            # Create a green background similar to PokerTH
-            img = np.ones((768, 1024, 3), dtype=np.uint8)
-            img[:, :, 0] = 0    # B
-            img[:, :, 1] = 100  # G
-            img[:, :, 2] = 0    # R
-            
-            # Draw the poker table (oval in the center)
-            cv2.ellipse(img, (512, 384), (400, 250), 0, 0, 360, (0, 50, 0), -1)
-            
-            # Add community cards (flop, turn, river)
-            card_positions = [(390, 220), (450, 220), (510, 220), (570, 220), (630, 220)]
-            card_values = ['10', 'A', 'J', '3', '6']
-            card_suits = ['♦', '♦', '♥', '♦', '♣']
-            
-            for i, pos in enumerate(card_positions):
-                if i < 5:  # All five cards
-                    x, y = pos
-                    # Draw card rectangle
-                    cv2.rectangle(img, (x, y), (x + 45, y + 65), (255, 255, 255), -1)
-                    
-                    # Add card value and suit
-                    cv2.putText(img, card_values[i], (x + 5, y + 20), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if card_suits[i] in ['♦', '♥'] else (0, 0, 0), 2)
-                    cv2.putText(img, card_suits[i], (x + 5, y + 50), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255) if card_suits[i] in ['♦', '♥'] else (0, 0, 0), 2)
-            
-            # Add player cards (at the bottom)
-            player_card_pos = [(510, 330), (560, 330)]
-            player_values = ['10', 'J']
-            player_suits = ['♣', '♦']
-            
-            for i, pos in enumerate(player_card_pos):
-                x, y = pos
-                # Draw card rectangle
-                cv2.rectangle(img, (x, y), (x + 45, y + 65), (255, 255, 255), -1)
-                
-                # Add card value and suit
-                cv2.putText(img, player_values[i], (x + 5, y + 20), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if player_suits[i] in ['♦', '♥'] else (0, 0, 0), 2)
-                cv2.putText(img, player_suits[i], (x + 5, y + 50), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255) if player_suits[i] in ['♦', '♥'] else (0, 0, 0), 2)
-            
-            # Add "MOCK SCREENSHOT" text
-            cv2.putText(
-                img, 
-                "MOCK SCREENSHOT - NO WINDOW SELECTED", 
-                (50, 30), 
-                cv2.FONT_HERSHEY_SIMPLEX, 
-                0.7, 
-                (0, 0, 255), 
-                2
-            )
-            
-            logger.info(f"Mock screenshot created successfully, shape: {img.shape}")
-            return img
-            
-        except Exception as e:
-            logger.error(f"Error creating mock screenshot: {str(e)}", exc_info=True)
-            # Return a very simple image as ultimate fallback
-            simple_img = np.ones((480, 640, 3), dtype=np.uint8) * 100
-            cv2.putText(simple_img, "ERROR - FALLBACK IMAGE", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            return simple_img
 
     def process_screenshot(self, img):
         """
@@ -623,37 +550,6 @@ class PokerScreenGrabber:
             
             self.current_state = game_state
             return game_state
-
-    def _is_card_present(self, card_img):
-        """
-        Check if an image region contains a card
-        
-        Args:
-            card_img: Image region that might contain a card
-        
-        Returns:
-            bool: True if a card is detected, False otherwise
-        """
-        try:
-            if card_img is None or card_img.size == 0:
-                return False
-            
-            # Convert to grayscale
-            gray = cv2.cvtColor(card_img, cv2.COLOR_BGR2GRAY)
-            
-            # Threshold to find white areas (cards are mostly white)
-            _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-            
-            # Count white pixels
-            white_pixels = cv2.countNonZero(thresh)
-            total_pixels = card_img.shape[0] * card_img.shape[1]
-            
-            # If more than 30% of pixels are white, it's likely a card
-            return white_pixels > (total_pixels * 0.3)
-        
-        except Exception as e:
-            logger.error(f"Error checking for card presence: {str(e)}")
-            return False
 
     def get_current_state(self):
         """
@@ -1260,6 +1156,274 @@ class PokerScreenGrabber:
         except Exception as e:
             logger.error(f"Error checking for bet presence: {str(e)}")
             return False
+
+
+    def create_mock_screenshot(self):
+        """
+        Create a mock screenshot based on the provided PokerTH screenshot
+        
+        Returns:
+            numpy.ndarray: Mock screenshot
+        """
+        try:
+            logger.info("Creating mock screenshot")
+            
+            # Create a green background similar to PokerTH
+            img = np.ones((768, 1024, 3), dtype=np.uint8)
+            img[:, :, 0] = 0    # B
+            img[:, :, 1] = 100  # G
+            img[:, :, 2] = 0    # R
+            
+            # Draw the poker table (oval in the center)
+            cv2.ellipse(img, (512, 384), (400, 250), 0, 0, 360, (0, 50, 0), -1)
+            
+            # Add community cards (flop, turn, river)
+            card_positions = [(390, 220), (450, 220), (510, 220), (570, 220), (630, 220)]
+            card_values = ['10', 'A', 'J', '3', '6']
+            card_suits = ['♦', '♦', '♥', '♦', '♣']
+            suit_colors = {
+                '♥': (0, 0, 255),  # Red for hearts
+                '♦': (0, 0, 255),  # Red for diamonds
+                '♣': (0, 0, 0),    # Black for clubs
+                '♠': (0, 0, 0)     # Black for spades
+            }
+            
+            for i, pos in enumerate(card_positions):
+                if i < 5:  # All five cards
+                    x, y = pos
+                    # Draw card rectangle
+                    cv2.rectangle(img, (x, y), (x + 45, y + 65), (255, 255, 255), -1)
+                    
+                    # Add card value on top of the card
+                    cv2.putText(img, card_values[i], 
+                            (x + 5, y + 20),  # Position at top of card
+                            cv2.FONT_HERSHEY_SIMPLEX, 
+                            0.7, 
+                            suit_colors[card_suits[i]], 
+                            2)
+                    
+                    # Add card suit on bottom part of the card
+                    cv2.putText(img, card_suits[i], 
+                            (x + 5, y + 50),  # Position at bottom of card
+                            cv2.FONT_HERSHEY_SIMPLEX, 
+                            1.2, 
+                            suit_colors[card_suits[i]], 
+                            2)
+            
+            # Add player cards (at the bottom)
+            player_card_pos = [(510, 330), (560, 330)]
+            player_values = ['10', 'J']
+            player_suits = ['♣', '♦']
+            
+            for i, pos in enumerate(player_card_pos):
+                x, y = pos
+                # Draw card rectangle
+                cv2.rectangle(img, (x, y), (x + 45, y + 65), (255, 255, 255), -1)
+                
+                # Add card value on top of the card
+                cv2.putText(img, player_values[i], 
+                        (x + 5, y + 20),  # Position at top of card
+                        cv2.FONT_HERSHEY_SIMPLEX, 
+                        0.7, 
+                        suit_colors[player_suits[i]], 
+                        2)
+                
+                # Add card suit on bottom part of the card
+                cv2.putText(img, player_suits[i], 
+                        (x + 5, y + 50),  # Position at bottom of card
+                        cv2.FONT_HERSHEY_SIMPLEX, 
+                        1.2, 
+                        suit_colors[player_suits[i]], 
+                        2)
+            
+            # Add "MOCK SCREENSHOT" text
+            cv2.putText(
+                img, 
+                "MOCK SCREENSHOT - NO WINDOW SELECTED", 
+                (50, 30), 
+                cv2.FONT_HERSHEY_SIMPLEX, 
+                0.7, 
+                (0, 0, 255), 
+                2
+            )
+            
+            logger.info(f"Mock screenshot created successfully, shape: {img.shape}")
+            return img
+            
+        except Exception as e:
+            logger.error(f"Error creating mock screenshot: {str(e)}", exc_info=True)
+            # Return a very simple image as ultimate fallback
+            simple_img = np.ones((480, 640, 3), dtype=np.uint8) * 100
+            cv2.putText(simple_img, "ERROR - FALLBACK IMAGE", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            return simple_img
+
+
+    def _is_card_present(self, card_img):
+        """
+        Check if an image region contains a card
+        
+        Args:
+            card_img: Image region that might contain a card
+        
+        Returns:
+            bool: True if a card is detected, False otherwise
+        """
+        try:
+            if card_img is None or card_img.size == 0:
+                return False
+            
+            # Convert to grayscale
+            gray = cv2.cvtColor(card_img, cv2.COLOR_BGR2GRAY)
+            
+            # Threshold to find white areas (cards are mostly white)
+            _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+            
+            # Count white pixels
+            white_pixels = cv2.countNonZero(thresh)
+            total_pixels = card_img.shape[0] * card_img.shape[1]
+            
+            # If more than 30% of pixels are white, it's likely a card
+            return white_pixels > (total_pixels * 0.3)
+        
+        except Exception as e:
+            logger.error(f"Error checking for card presence: {str(e)}")
+            return False
+
+
+    def identify_card(self, card_img):
+        """
+        Identify card value and suit from an image region
+        
+        Args:
+            card_img: Image of a card
+            
+        Returns:
+            tuple: (value, suit) as strings
+        """
+        try:
+            if card_img is None or card_img.size == 0:
+                logger.warning("Empty card image provided to identify_card")
+                return None, None
+            
+            # Get image dimensions
+            h, w = card_img.shape[:2]
+            
+            # Split card into top and bottom regions
+            value_region = card_img[0:int(h*0.4), 0:w]  # Top 40% for value
+            suit_region = card_img[int(h*0.4):h, 0:w]   # Bottom 60% for suit
+            
+            # For value detection
+            value_gray = cv2.cvtColor(value_region, cv2.COLOR_BGR2GRAY)
+            _, value_thresh = cv2.threshold(value_gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            
+            # Use OCR to extract value
+            value_text = pytesseract.image_to_string(
+                value_thresh, 
+                config='--psm 10 -c tessedit_char_whitelist=0123456789AJQK'
+            ).strip().upper()
+            
+            # Clean up and interpret value
+            value = self._interpret_card_value(value_text)
+            
+            # For suit detection
+            suit_gray = cv2.cvtColor(suit_region, cv2.COLOR_BGR2GRAY)
+            _, suit_thresh = cv2.threshold(suit_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            
+            # Convert to HSV for color detection
+            suit_hsv = cv2.cvtColor(suit_region, cv2.COLOR_BGR2HSV)
+            
+            # Check for red color (for hearts and diamonds)
+            lower_red1 = np.array([0, 100, 100])
+            upper_red1 = np.array([10, 255, 255])
+            lower_red2 = np.array([170, 100, 100])
+            upper_red2 = np.array([180, 255, 255])
+            
+            red_mask1 = cv2.inRange(suit_hsv, lower_red1, upper_red1)
+            red_mask2 = cv2.inRange(suit_hsv, lower_red2, upper_red2)
+            red_mask = cv2.bitwise_or(red_mask1, red_mask2)
+            
+            is_red_suit = cv2.countNonZero(red_mask) > 0
+            
+            # Use OCR for suit symbol
+            suit_text = pytesseract.image_to_string(
+                suit_thresh, 
+                config='--psm 10 -c tessedit_char_whitelist=♥♦♣♠hdcs'
+            ).strip().lower()
+            
+            # Determine suit
+            suit = self._interpret_card_suit(suit_text, is_red_suit)
+            
+            logger.info(f"Identified card: {value} of {suit}")
+            return value, suit
+            
+        except Exception as e:
+            logger.error(f"Error identifying card: {str(e)}")
+            return None, None
+
+    def _interpret_card_value(self, value_text):
+        """
+        Interpret OCR result for card value
+        
+        Args:
+            value_text: OCR text from value region
+            
+        Returns:
+            str: Card value ('2' through '10', 'J', 'Q', 'K', or 'A')
+        """
+        # Clean up OCR result
+        value_text = value_text.replace('O', '0').replace('o', '0')  # Common OCR errors
+        
+        # Handle '10' specially
+        if '10' in value_text or ('1' in value_text and '0' in value_text):
+            return '10'
+        
+        # Check for face cards and ace
+        if 'A' in value_text:
+            return 'A'
+        elif 'K' in value_text:
+            return 'K'
+        elif 'Q' in value_text:
+            return 'Q'
+        elif 'J' in value_text:
+            return 'J'
+        
+        # For numeric cards, find first digit
+        for char in value_text:
+            if char in '23456789':
+                return char
+        
+        # If all else fails
+        logger.warning(f"Could not interpret card value from text: '{value_text}'")
+        return '2'  # Default fallback
+
+    def _interpret_card_suit(self, suit_text, is_red_suit):
+        """
+        Interpret OCR result for card suit
+        
+        Args:
+            suit_text: OCR text from suit region
+            is_red_suit: Boolean indicating if the suit is red
+            
+        Returns:
+            str: Card suit ('hearts', 'diamonds', 'clubs', or 'spades')
+        """
+        # Check for suit symbols in the text
+        if '♥' in suit_text or 'h' in suit_text:
+            return 'hearts'
+        elif '♦' in suit_text or 'd' in suit_text:
+            return 'diamonds'
+        elif '♣' in suit_text or 'c' in suit_text:
+            return 'clubs'
+        elif '♠' in suit_text or 's' in suit_text:
+            return 'spades'
+        
+        # If OCR failed, use color information
+        if is_red_suit:
+            # For red suits, randomly choose (would use shape detection in production)
+            return 'hearts' if np.random.random() > 0.5 else 'diamonds'
+        else:
+            # For black suits, randomly choose (would use shape detection in production)
+            return 'clubs' if np.random.random() > 0.5 else 'spades'
 
 if __name__ == "__main__":
     # Standalone test
