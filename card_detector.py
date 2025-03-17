@@ -2,20 +2,19 @@ import cv2
 import numpy as np
 import os
 import logging
-import time
 import json
 from collections import Counter
 
-# Set up logging
+# Set up logging - reduced verbosity
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("CardDetector")
 
 class ImprovedCardDetector:
     """
-    Direct OpenCV-based card detector with robust correction system
+    OpenCV-based card detector with robust correction system for poker games
     """
     
-    def __init__(self, template_dir="card_templates"):
+    def __init__(self, template_dir="card_templates", debug_mode=False):
         self.template_dir = template_dir
         self.card_values = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
         self.card_suits = ['hearts', 'diamonds', 'clubs', 'spades']
@@ -23,49 +22,50 @@ class ImprovedCardDetector:
         # Configure detection parameters
         self.white_threshold = 170
         self.min_white_percent = 20
-        self.debug_mode = True
-        
-        # Hard-coded rules for specific problematic cards (direct solution)
-        self.specific_fixes = {
-            # Format: "feature_signature": (correct_value, correct_suit)
-            # Example: "CARD_3C": ("3", "clubs")
-        }
+        self.debug_mode = debug_mode
         
         # Ensure template directory exists
         os.makedirs(template_dir, exist_ok=True)
         
-        # Load or create the corrections
-        self.load_corrections()
+        # Load corrections
+        self.corrections = self._load_corrections()
+        
+        # Cache for detected cards to improve performance
+        self._detection_cache = {}
     
-    def load_corrections(self):
+    def _load_corrections(self):
         """Load corrections from file"""
-        self.corrections = {}
+        corrections = {}
         correction_file = os.path.join(self.template_dir, "direct_corrections.json")
         
         if os.path.exists(correction_file):
             try:
                 with open(correction_file, 'r') as f:
-                    self.corrections = json.load(f)
-                logger.info(f"Loaded {len(self.corrections)} corrections from {correction_file}")
+                    corrections = json.load(f)
+                if self.debug_mode:
+                    logger.info(f"Loaded {len(corrections)} corrections from {correction_file}")
+                return corrections
             except Exception as e:
                 logger.error(f"Error loading corrections: {str(e)}")
-        else:
-            # Create initial corrections file
-            try:
-                # Start with some default corrections
-                default_corrections = {
-                    # Format: "red_percent|aspect_ratio|complexity": [value, suit]
-                    "3.5|0.58|22.5": ["3", "clubs"],  # Example: correcting 3 of clubs
-                    "2.1|0.85|18.2": ["A", "spades"]   # Example: correcting A of spades
-                }
-                
-                with open(correction_file, 'w') as f:
-                    json.dump(default_corrections, f, indent=4)
-                
-                self.corrections = default_corrections
+        
+        # Create default corrections if file doesn't exist
+        default_corrections = {
+            # Format: "red_percent|aspect_ratio|complexity": [value, suit]
+            "3.5|0.58|22.5": ["3", "clubs"],  # Example: correcting 3 of clubs
+            "2.1|0.85|18.2": ["A", "spades"]   # Example: correcting A of spades
+        }
+        
+        # Save default corrections
+        try:
+            os.makedirs(os.path.dirname(correction_file), exist_ok=True)
+            with open(correction_file, 'w') as f:
+                json.dump(default_corrections, f, indent=4)
+            if self.debug_mode:
                 logger.info(f"Created default corrections file with {len(default_corrections)} entries")
-            except Exception as e:
-                logger.error(f"Error creating corrections file: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error creating corrections file: {str(e)}")
+        
+        return default_corrections
     
     def save_corrections(self):
         """Save current corrections to file"""
@@ -73,7 +73,8 @@ class ImprovedCardDetector:
         try:
             with open(correction_file, 'w') as f:
                 json.dump(self.corrections, f, indent=4)
-            logger.info(f"Saved {len(self.corrections)} corrections to {correction_file}")
+            if self.debug_mode:
+                logger.info(f"Saved {len(self.corrections)} corrections to {correction_file}")
             return True
         except Exception as e:
             logger.error(f"Error saving corrections: {str(e)}")
@@ -93,7 +94,16 @@ class ImprovedCardDetector:
         
         # Save to file
         self.save_corrections()
-        logger.info(f"Added correction: {feature_key} -> {correct_value} of {correct_suit}")
+        if self.debug_mode:
+            logger.info(f"Added correction: {feature_key} -> {correct_value} of {correct_suit}")
+    
+    def _compute_card_hash(self, card_img):
+        """Compute a hash for a card image to use with caching"""
+        if card_img is None or card_img.size == 0:
+            return None
+        # Simple hashing approach using downsized image mean values
+        small_img = cv2.resize(card_img, (16, 16))
+        return hash(small_img.tobytes()[:100])
     
     def detect_card(self, card_img):
         """
@@ -107,27 +117,18 @@ class ImprovedCardDetector:
         """
         try:
             if card_img is None or card_img.size == 0:
-                logger.warning("Card image is empty")
                 return '?', '?'
             
-            # Create debugging directory
-            timestamp = int(time.time())
-            if self.debug_mode:
-                debug_dir = "debug_card_images"
-                os.makedirs(debug_dir, exist_ok=True)
-                card_dir = os.path.join(debug_dir, f"card_{timestamp}")
-                os.makedirs(card_dir, exist_ok=True)
-                
-                # Save original image
-                orig_path = os.path.join(card_dir, "original.png")
-                cv2.imwrite(orig_path, card_img)
+            # Check cache first for improved performance
+            card_hash = self._compute_card_hash(card_img)
+            if card_hash in self._detection_cache:
+                return self._detection_cache[card_hash]
             
             # STEP 1: Determine if card is red or black
             red_percent = self._calculate_red_percentage(card_img)
             is_red = red_percent > 5
             
             # STEP 2: Extract value and suit regions
-            # We'll use fixed regions based on typical card layouts
             height, width = card_img.shape[:2]
             
             # Value is typically in the top-left corner
@@ -136,13 +137,7 @@ class ImprovedCardDetector:
             # Suit is typically in the center
             suit_region = card_img[int(height*0.6):int(height), 0:int(width)]
             
-            # Save regions for debugging
-            if self.debug_mode:
-                cv2.imwrite(os.path.join(card_dir, "value_region.png"), value_region)
-                cv2.imwrite(os.path.join(card_dir, "suit_region.png"), suit_region)
-            
             # STEP 3: Analyze shapes to determine value and suit
-            # Extract features that we can use for classification and corrections
             value_features = self._calculate_shape_features(value_region, not is_red)
             suit_features = self._calculate_shape_features(suit_region, not is_red)
             
@@ -153,83 +148,29 @@ class ImprovedCardDetector:
             if feature_key in self.corrections:
                 # Use the correction
                 value, suit = self.corrections[feature_key]
-                logger.info(f"Applied correction for {feature_key}: {value} of {suit}")
                 
-                if self.debug_mode:
-                    # Create a debug image with the correction info
-                    debug_img = card_img.copy()
-                    cv2.putText(debug_img, f"CORRECTION:", (5, 15), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
-                    cv2.putText(debug_img, f"{value} of {suit}", (5, 35), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-                    cv2.putText(debug_img, f"Key: {feature_key}", (5, 55), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-                    
-                    result_path = os.path.join(card_dir, "correction_result.png")
-                    cv2.imwrite(result_path, debug_img)
-                    
-                    # Save the feature key and correction details
-                    with open(os.path.join(card_dir, "correction_info.txt"), 'w') as f:
-                        f.write(f"Feature Key: {feature_key}\n")
-                        f.write(f"Correction: {value} of {suit}\n")
-            else:
-                # STEP 6: Perform direct classification using shape features
-                value = self._classify_value(value_features, is_red)
-                suit = self._classify_suit(suit_features, is_red)
-                
-                # Save feature key for reference (to make adding corrections easier)
-                if self.debug_mode:
-                    with open(os.path.join(card_dir, "feature_key.txt"), 'w') as f:
-                        f.write(f"Feature Key: {feature_key}\n")
-                        f.write(f"Detected: {value} of {suit}\n")
-                        f.write(f"To add correction, use this exact code:\n")
-                        f.write(f"detector.add_correction(\"{feature_key}\", \"correct_value\", \"correct_suit\")\n")
-                
-                # STEP 7: Apply specific rules for problematic cases like 3 of clubs vs Ace of spades
-                if value == 'A' and suit == 'spades' and not is_red:
-                    # The classic 3 of clubs vs Ace of spades problem
-                    if 0.5 <= value_features['aspect_ratio'] <= 0.65 and value_features['complexity'] >= 20:
-                        value = '3'
-                        suit = 'clubs'
-                        
-                        if self.debug_mode:
-                            # Note the rule-based correction
-                            with open(os.path.join(card_dir, "rule_correction.txt"), 'w') as f:
-                                f.write("Applied rule-based correction: 3 of clubs\n")
+                # Cache the result
+                self._detection_cache[card_hash] = (value, suit)
+                return value, suit
             
-            # STEP 8: Create debug output with detailed information
-            if self.debug_mode:
-                # Create annotated result image
-                debug_img = card_img.copy()
-                
-                # Draw value and suit regions
-                height, width = card_img.shape[:2]
-                cv2.rectangle(debug_img, (0, 0), (int(width*0.25), int(height*0.25)), (0, 255, 0), 2)
-                cv2.rectangle(debug_img, (int(width*0.3), int(height*0.3)), 
-                             (int(width*0.7), int(height*0.7)), (255, 0, 0), 2)
-                
-                # Add detection result
-                cv2.putText(debug_img, f"{value} of {suit}", (5, 15), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-                           
-                cv2.putText(debug_img, f"Red: {red_percent:.1f}%", 
-                           (5, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-                
-                cv2.putText(debug_img, f"V-AR: {value_features['aspect_ratio']:.2f}, V-CX: {value_features['complexity']:.1f}", 
-                           (5, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-                
-                cv2.putText(debug_img, f"Key: {feature_key}", 
-                           (5, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-                
-                # Save the annotated image
-                result_path = os.path.join(card_dir, "result.png")
-                cv2.imwrite(result_path, debug_img)
+            # STEP 6: Perform direct classification using shape features
+            value = self._classify_value(value_features, is_red)
+            suit = self._classify_suit(suit_features, is_red)
             
-            logger.info(f"Detected card: {value} of {suit} (feature key: {feature_key})")
+            # STEP 7: Apply specific rules for problematic cases like 3 of clubs vs Ace of spades
+            if value == 'A' and suit == 'spades' and not is_red:
+                # The classic 3 of clubs vs Ace of spades problem
+                if 0.5 <= value_features['aspect_ratio'] <= 0.65 and value_features['complexity'] >= 20:
+                    value = '3'
+                    suit = 'clubs'
+            
+            # Cache the result
+            self._detection_cache[card_hash] = (value, suit)
+            
             return value, suit
             
         except Exception as e:
-            logger.error(f"Error detecting card: {str(e)}", exc_info=True)
+            logger.error(f"Error detecting card: {str(e)}")
             return '?', '?'
     
     def _calculate_red_percentage(self, img):
@@ -405,14 +346,18 @@ class ImprovedCardDetector:
                 return 'clubs'     # Clubs typically have a more complex shape
             else:
                 return 'spades'    # Spades typically have a simpler shape
+    
+    def clear_cache(self):
+        """Clear the detection cache"""
+        self._detection_cache.clear()
 
 
 class EnhancedTextRecognition:
     """Enhanced text recognition for chip counts and other poker text with improved performance"""
     
-    def __init__(self):
+    def __init__(self, debug_mode=False):
         self.text_colors = ['white', 'yellow', 'green']
-        self.debug_mode = False
+        self.debug_mode = debug_mode
         
         # Results cache to avoid redundant processing
         self._cache = {}
@@ -462,14 +407,6 @@ class EnhancedTextRecognition:
             # Extract the region
             chip_img = img[y:y+h, x:x+w]
             
-            # Create debug directory if needed
-            if self.debug_mode:
-                debug_dir = "debug_text_images"
-                os.makedirs(debug_dir, exist_ok=True)
-                timestamp = int(time.time())
-                orig_path = f"{debug_dir}/text_orig_{timestamp}.png"
-                cv2.imwrite(orig_path, chip_img)
-            
             # Try different methods
             results = []
             confidence_scores = []
@@ -507,11 +444,8 @@ class EnhancedTextRecognition:
                     final_result = results[max_conf_idx]
                 else:
                     # If no confidence scores, use the most frequent result
-                    from collections import Counter
                     result_counts = Counter(results)
                     final_result = result_counts.most_common(1)[0][0]
-                
-                logger.debug(f"Extracted text: {final_result} (from {len(results)} methods)")
                 
                 # Cache the result
                 self._cache[region_hash] = final_result
@@ -519,7 +453,6 @@ class EnhancedTextRecognition:
                 return final_result
             
             # If all methods fail, return default
-            logger.warning("All text extraction methods failed, using default value")
             default_value = 1000
             self._cache[region_hash] = default_value
             return default_value
@@ -531,30 +464,12 @@ class EnhancedTextRecognition:
     def _extract_number_basic(self, img):
         """Basic OCR with minimal preprocessing"""
         try:
-            # Create debug directory if needed
-            if self.debug_mode:
-                debug_dir = "debug_text_images"
-                os.makedirs(debug_dir, exist_ok=True)
-                timestamp = int(time.time())
-            
             # Convert to grayscale
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            
-            # Save grayscale image in debug mode
-            if self.debug_mode:
-                gray_path = f"{debug_dir}/text_gray_{timestamp}.png"
-                cv2.imwrite(gray_path, gray)
             
             # Apply thresholding - try both regular and inverse thresholding
             _, thresh1 = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
             _, thresh2 = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
-            
-            # Save threshold images in debug mode
-            if self.debug_mode:
-                thresh1_path = f"{debug_dir}/text_thresh1_{timestamp}.png"
-                cv2.imwrite(thresh1_path, thresh1)
-                thresh2_path = f"{debug_dir}/text_thresh2_{timestamp}.png"
-                cv2.imwrite(thresh2_path, thresh2)
             
             # OCR on both thresholded images
             # In a real implementation, this would use pytesseract
@@ -591,12 +506,6 @@ class EnhancedTextRecognition:
     def _extract_number_color_filtered(self, img, color):
         """Extract number using color filtering"""
         try:
-            # Create debug directory if needed
-            if self.debug_mode:
-                debug_dir = "debug_text_images"
-                os.makedirs(debug_dir, exist_ok=True)
-                timestamp = int(time.time())
-            
             # Convert to HSV
             hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
             
@@ -615,11 +524,6 @@ class EnhancedTextRecognition:
             
             # Create mask
             mask = cv2.inRange(hsv, lower, upper)
-            
-            # Save mask image in debug mode
-            if self.debug_mode:
-                mask_path = f"{debug_dir}/text_{color}_mask_{timestamp}.png"
-                cv2.imwrite(mask_path, mask)
             
             # OCR on mask
             # In a real implementation, this would use pytesseract
@@ -641,23 +545,12 @@ class EnhancedTextRecognition:
     def _extract_number_adaptive(self, img):
         """Extract number using adaptive thresholding"""
         try:
-            # Create debug directory if needed
-            if self.debug_mode:
-                debug_dir = "debug_text_images"
-                os.makedirs(debug_dir, exist_ok=True)
-                timestamp = int(time.time())
-            
             # Convert to grayscale
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             
             # Apply adaptive thresholding
             adaptive = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                                             cv2.THRESH_BINARY_INV, 11, 2)
-            
-            # Save adaptive image in debug mode
-            if self.debug_mode:
-                adaptive_path = f"{debug_dir}/text_adaptive_{timestamp}.png"
-                cv2.imwrite(adaptive_path, adaptive)
             
             # OCR
             # In a real implementation, this would use pytesseract
@@ -679,12 +572,6 @@ class EnhancedTextRecognition:
     def _extract_number_edge_enhanced(self, img):
         """Extract number by enhancing edges"""
         try:
-            # Create debug directory if needed
-            if self.debug_mode:
-                debug_dir = "debug_text_images"
-                os.makedirs(debug_dir, exist_ok=True)
-                timestamp = int(time.time())
-            
             # Convert to grayscale
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             
@@ -694,11 +581,6 @@ class EnhancedTextRecognition:
             # Dilate to connect edges
             kernel = np.ones((3,3), np.uint8)
             dilated = cv2.dilate(edges, kernel, iterations=1)
-            
-            # Save edge image in debug mode
-            if self.debug_mode:
-                edge_path = f"{debug_dir}/text_edge_{timestamp}.png"
-                cv2.imwrite(edge_path, dilated)
             
             # OCR
             # In a real implementation, this would use pytesseract
@@ -716,3 +598,7 @@ class EnhancedTextRecognition:
         except Exception as e:
             logger.error(f"Error in edge enhanced OCR: {str(e)}")
             return 0, 0
+            
+    def clear_cache(self):
+        """Clear the recognition cache"""
+        self._cache.clear()

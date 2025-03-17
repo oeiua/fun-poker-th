@@ -192,55 +192,113 @@ class OptimizedPokerAnalyzer:
             return self._create_default_game_state()
     
     def _extract_card(self, img, region, cards_list):
-        """Extract a card from the image and add it to the cards list"""
+        """
+        Extract a card from the image and add it to the cards list.
+        Improved with better error handling and reliability.
+        
+        Args:
+            img: Source image
+            region: Region tuple (x, y, w, h)
+            cards_list: List to append detected cards to
+        """
         try:
             x, y, w, h = region
             
             # Ensure region is within image bounds
             if not self._is_valid_region(region, img.shape):
                 return
-                
+                    
             # Extract card image
             card_img = img[y:y+h, x:x+w]
             
             # Check if card is visible (not folded)
-            if self._is_card_visible(card_img):
-                value, suit = self.card_detector.detect_card(card_img)
+            if not self._is_card_visible(card_img):
+                return
                 
-                # Only add valid cards
-                if value not in ['?', ''] and suit not in ['?', '']:
-                    cards_list.append({
-                        'value': value,
-                        'suit': suit
-                    })
+            # Detect the card
+            value, suit = self.card_detector.detect_card(card_img)
+            
+            # Only add valid cards
+            if value not in ['?', ''] and suit not in ['?', '']:
+                cards_list.append({
+                    'value': value,
+                    'suit': suit
+                })
         except Exception as e:
-            self.logger.error(f"Error extracting card: {str(e)}")
-    
+            logger.error(f"Error extracting card: {str(e)}")
+
     def _is_valid_region(self, region, img_shape):
-        """Check if a region is valid within the image bounds"""
+        """
+        Check if a region is valid within the image bounds.
+        Added padding to avoid boundary-related issues.
+        
+        Args:
+            region: Region tuple (x, y, w, h)
+            img_shape: Image shape (height, width, channels)
+            
+        Returns:
+            bool: True if region is valid
+        """
         x, y, w, h = region
         h_img, w_img = img_shape[:2]
-        return (x >= 0 and y >= 0 and x+w <= w_img and y+h <= h_img)
-    
+        
+        # Add padding check to avoid boundary issues
+        padding = 2
+        return (x >= padding and y >= padding and 
+                x+w <= w_img-padding and y+h <= h_img-padding and
+                w > 0 and h > 0)
+
     def _is_card_visible(self, card_img):
-        """Check if a card is visible (not folded or hidden)"""
+        """
+        Check if a card is visible (not folded or hidden).
+        Improved with multi-threshold analysis for better reliability.
+        
+        Args:
+            card_img: Card image region
+            
+        Returns:
+            bool: True if a card is likely present
+        """
         if card_img is None or card_img.size == 0:
             return False
         
-        # Convert to grayscale
-        gray = cv2.cvtColor(card_img, cv2.COLOR_BGR2GRAY)
-        
-        # Apply thresholding to find white/light areas (cards are mostly white)
-        _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
-        
-        # Count white pixels
-        white_pixels = cv2.countNonZero(thresh)
-        total_pixels = card_img.shape[0] * card_img.shape[1]
-        white_percent = (white_pixels / total_pixels) * 100
-        
-        # If more than 30% of pixels are white, it's likely a card is present
-        return white_percent > 30
-    
+        try:
+            # Convert to grayscale
+            gray = cv2.cvtColor(card_img, cv2.COLOR_BGR2GRAY)
+            
+            # Multi-threshold approach for better reliability
+            thresholds = [150, 180, 200]
+            white_percentages = []
+            
+            for threshold in thresholds:
+                # Apply thresholding to find white/light areas
+                _, thresh = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+                
+                # Count white pixels
+                white_pixels = cv2.countNonZero(thresh)
+                total_pixels = card_img.shape[0] * card_img.shape[1]
+                white_percent = (white_pixels / total_pixels) * 100
+                white_percentages.append(white_percent)
+            
+            # Calculate average white percentage across thresholds
+            avg_white_percent = sum(white_percentages) / len(white_percentages)
+            
+            # Check standard deviation to detect variance in white detection
+            std_dev = np.std(white_percentages)
+            
+            # If very consistent across thresholds with high white percentage,
+            # it's more likely to be a card
+            is_consistent = std_dev < 10
+            
+            # Higher confidence if consistent readings
+            min_white_threshold = 25 if is_consistent else 35
+            
+            return avg_white_percent > min_white_threshold
+            
+        except Exception as e:
+            logger.error(f"Error checking card visibility: {str(e)}")
+            return False
+
     def _is_player_active(self, img, player_id):
         """
         Check if a player is active in the game
