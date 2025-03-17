@@ -4,26 +4,17 @@ import pyautogui
 import time
 import os
 import threading
-import tkinter as tk
-from tkinter import ttk
-from PIL import Image, ImageTk
-import pytesseract
-from enum import Enum
-import re
+import queue
+import logging
 import json
 import datetime
-import logging
 import copy
-import json
-
-# Filename: poker_screen_grabber.py
+import re
+from pathlib import Path
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("ScreenGrabber")
-
-# On Windows, you need to set the path to tesseract executable
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+logger = logging.getLogger("PokerScreenGrabber")
 
 # Import platform-specific window handling libraries
 try:
@@ -53,85 +44,6 @@ except ImportError:
     MAC_PLATFORM = False
     logger.info("macOS-specific libraries not available")
 
-class CardSuit(Enum):
-    HEARTS = "hearts"
-    DIAMONDS = "diamonds"
-    CLUBS = "clubs"
-    SPADES = "spades"
-
-class CardValue(Enum):
-    TWO = "2"
-    THREE = "3"
-    FOUR = "4"
-    FIVE = "5"
-    SIX = "6"
-    SEVEN = "7"
-    EIGHT = "8"
-    NINE = "9"
-    TEN = "10"
-    JACK = "J"
-    QUEEN = "Q"
-    KING = "K"
-    ACE = "A"
-
-class Card:
-    def __init__(self, value, suit):
-        self.value = value
-        self.suit = suit
-    
-    def __str__(self):
-        return f"{self.value.value} of {self.suit.value}"
-    
-    def to_dict(self):
-        return {
-            "value": self.value.value,
-            "suit": self.suit.value
-        }
-
-class Player:
-    def __init__(self, position, chips, cards=None):
-        self.position = position
-        self.chips = chips
-        self.cards = cards if cards else []
-        self.last_action = None
-        self.bet_amount = 0
-    
-    def to_dict(self):
-        return {
-            "position": self.position,
-            "chips": self.chips,
-            "cards": [card.to_dict() for card in self.cards] if self.cards else [],
-            "last_action": self.last_action,
-            "bet_amount": self.bet_amount
-        }
-
-class GameState:
-    def __init__(self):
-        self.players = {}  # {position: Player object}
-        self.community_cards = []
-        self.pot_size = 0
-        self.current_player = None
-        self.small_blind_position = None
-        self.big_blind_position = None
-        self.dealer_position = None
-        self.hand_number = 0
-        self.timestamp = None
-        self.game_stage = 'preflop'  # Added game stage (preflop, flop, turn, river)
-    
-    def to_dict(self):
-        return {
-            "timestamp": self.timestamp,
-            "hand_number": self.hand_number,
-            "game_stage": self.game_stage,  # Include game stage in output
-            "players": {pos: player.to_dict() for pos, player in self.players.items()},
-            "community_cards": [card.to_dict() for card in self.community_cards],
-            "pot_size": self.pot_size,
-            "current_player": self.current_player,
-            "small_blind_position": self.small_blind_position,
-            "big_blind_position": self.big_blind_position,
-            "dealer_position": self.dealer_position
-        }
-
 class WindowInfo:
     def __init__(self, title="", handle=None, rect=None):
         self.title = title
@@ -140,6 +52,610 @@ class WindowInfo:
     
     def __str__(self):
         return f"{self.title} ({self.handle})"
+
+class PokerTableDetector:
+    """Detect poker table and player positions in screenshots"""
+    
+    def __init__(self):
+        self.logger = logging.getLogger("PokerTableDetector")
+        
+        # Color ranges for detecting green poker table
+        self.table_color_ranges = [
+            # Light green
+            [(35, 30, 40), (90, 255, 255)],
+            # Dark green
+            [(35, 30, 20), (90, 255, 120)]
+        ]
+        
+        # Color ranges for detecting card positions (white areas)
+        self.card_color_range = [(0, 0, 180), (180, 30, 255)]  # White in HSV
+        
+        # Cached results to avoid redundant processing
+        self.cached_screenshot_hash = None
+        self.cached_table_contour = None
+        self.cached_player_positions = None
+    
+    def detect_table(self, img):
+        """
+        Detect poker table in the image
+        
+        Args:
+            img: Source image
+            
+        Returns:
+            Tuple: (table_contour, table_rect, center_point)
+                where table_contour is the largest detected green contour,
+                table_rect is (x, y, w, h) of bounding box,
+                center_point is (cx, cy) of the table center
+        """
+        try:
+            # Convert to HSV for better color detection
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            
+            # Create masks for each green color range
+            masks = []
+            for lower, upper in self.table_color_ranges:
+                mask = cv2.inRange(hsv, np.array(lower), np.array(upper))
+                masks.append(mask)
+            
+            # Combine masks
+            combined_mask = masks[0]
+            for mask in masks[1:]:
+                combined_mask = cv2.bitwise_or(combined_mask, mask)
+            
+            # Apply morphological operations to clean up the mask
+            kernel = np.ones((5, 5), np.uint8)
+            morphed = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+            
+            # Find contours
+            contours, _ = cv2.findContours(morphed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            if not contours:
+                self.logger.warning("No table contours found")
+                return None, None, None
+            
+            # Find the largest contour by area
+            table_contour = max(contours, key=cv2.contourArea)
+            
+            # Get the bounding rectangle
+            x, y, w, h = cv2.boundingRect(table_contour)
+            
+            # Calculate the center of the table
+            moments = cv2.moments(table_contour)
+            if moments["m00"] == 0:
+                # Fallback to bounding rect center if moments fail
+                cx = x + w // 2
+                cy = y + h // 2
+            else:
+                cx = int(moments["m10"] / moments["m00"])
+                cy = int(moments["m01"] / moments["m00"])
+            
+            return table_contour, (x, y, w, h), (cx, cy)
+        
+        except Exception as e:
+            self.logger.error(f"Error detecting table: {str(e)}")
+            return None, None, None
+    
+    def detect_player_positions(self, img, table_center=None):
+        """
+        Detect player positions around the poker table
+        
+        Args:
+            img: Source image
+            table_center: Optional center point of the table (cx, cy)
+            
+        Returns:
+            List of player position points [(x1, y1), (x2, y2), ...]
+        """
+        try:
+            if table_center is None:
+                # Try to detect the table first
+                _, _, table_center = self.detect_table(img)
+                
+                if table_center is None:
+                    self.logger.warning("No table center found for player position detection")
+                    return []
+            
+            cx, cy = table_center
+            h, w = img.shape[:2]
+            
+            # Estimate table radius (considering it's an oval)
+            table_radius_x = w // 3
+            table_radius_y = h // 3
+            
+            # Define player positions around the table based on common layouts
+            # For a 9-player table, positions are typically arranged in a circle
+            angles = np.linspace(0, 2*np.pi, 9, endpoint=False)
+            
+            # Start at bottom center and go clockwise
+            angles = (angles + np.pi/2) % (2*np.pi)
+            
+            # Calculate positions using elliptical coordinates
+            player_positions = []
+            for angle in angles:
+                # Calculate position on table ellipse
+                x = cx + int(table_radius_x * 0.8 * np.cos(angle))
+                y = cy + int(table_radius_y * 0.8 * np.sin(angle))
+                
+                # Ensure within image bounds
+                x = max(0, min(w-1, x))
+                y = max(0, min(h-1, y))
+                
+                player_positions.append((x, y))
+            
+            # Try to refine positions by looking for actual player cards
+            refined_positions = self._refine_positions_with_cards(img, player_positions)
+            
+            return refined_positions if refined_positions else player_positions
+        
+        except Exception as e:
+            self.logger.error(f"Error detecting player positions: {str(e)}")
+            return []
+    
+    def _refine_positions_with_cards(self, img, initial_positions, search_radius=50):
+        """
+        Refine player positions by looking for card-like regions
+        
+        Args:
+            img: Source image
+            initial_positions: Initial estimated player positions
+            search_radius: Radius around each position to search for cards
+            
+        Returns:
+            Refined list of player positions
+        """
+        try:
+            # Convert to HSV for color detection
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            
+            # Create mask for white (card color)
+            lower, upper = self.card_color_range
+            card_mask = cv2.inRange(hsv, np.array(lower), np.array(upper))
+            
+            # Apply morphological operations to clean up the mask
+            kernel = np.ones((3, 3), np.uint8)
+            card_mask = cv2.morphologyEx(card_mask, cv2.MORPH_CLOSE, kernel)
+            
+            # Find card contours
+            card_contours, _ = cv2.findContours(card_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            if not card_contours:
+                return initial_positions
+            
+            # Filter contours to find card-like shapes
+            card_contours = [c for c in card_contours if self._is_card_like(c)]
+            
+            if not card_contours:
+                return initial_positions
+            
+            # Refine each position by finding the nearest card-like contour
+            refined_positions = []
+            
+            for pos in initial_positions:
+                px, py = pos
+                
+                # Find contours within search radius
+                nearby_contours = []
+                for contour in card_contours:
+                    x, y, w, h = cv2.boundingRect(contour)
+                    contour_center_x = x + w // 2
+                    contour_center_y = y + h // 2
+                    
+                    distance = np.sqrt((px - contour_center_x)**2 + (py - contour_center_y)**2)
+                    
+                    if distance < search_radius:
+                        nearby_contours.append((contour, distance))
+                
+                if nearby_contours:
+                    # Use the nearest contour
+                    nearest_contour, _ = min(nearby_contours, key=lambda x: x[1])
+                    x, y, w, h = cv2.boundingRect(nearest_contour)
+                    refined_pos = (x + w // 2, y + h // 2)
+                    refined_positions.append(refined_pos)
+                else:
+                    # Keep original position if no nearby card contours
+                    refined_positions.append(pos)
+            
+            return refined_positions
+        
+        except Exception as e:
+            self.logger.error(f"Error refining positions: {str(e)}")
+            return initial_positions
+    
+    def _is_card_like(self, contour, min_area=100, max_area=5000, aspect_ratio_range=(0.5, 0.9)):
+        """Check if a contour has card-like properties"""
+        # Get area and perimeter
+        area = cv2.contourArea(contour)
+        
+        # Check area constraints
+        if area < min_area or area > max_area:
+            return False
+        
+        # Check aspect ratio
+        x, y, w, h = cv2.boundingRect(contour)
+        aspect_ratio = w / h if h > 0 else 0
+        
+        if aspect_ratio < aspect_ratio_range[0] or aspect_ratio > aspect_ratio_range[1]:
+            return False
+        
+        return True
+
+class AutoROICalibrator:
+    """Automatically calibrate regions of interest for poker screenshots"""
+    
+    def __init__(self):
+        self.logger = logging.getLogger("AutoROICalibrator")
+        self.table_detector = PokerTableDetector()
+        
+        # Default card dimensions (will be scaled based on detected table)
+        self.card_width = 45
+        self.card_height = 65
+        
+        # Default chip stack region dimensions
+        self.chip_region_width = 80
+        self.chip_region_height = 20
+        
+        # Default bet region dimensions
+        self.bet_region_width = 70
+        self.bet_region_height = 20
+        
+        # Default pot region dimensions
+        self.pot_region_width = 100
+        self.pot_region_height = 20
+    
+    def calibrate_roi(self, img):
+        """
+        Automatically calibrate regions of interest for a poker screenshot
+        
+        Args:
+            img: Source image
+            
+        Returns:
+            dict: Calibrated ROI configuration
+        """
+        try:
+            # Detect the poker table
+            table_contour, table_rect, table_center = self.table_detector.detect_table(img)
+            
+            if table_center is None:
+                self.logger.warning("Could not detect poker table, using default ROI")
+                return self._get_default_roi()
+            
+            # Get image dimensions
+            h, w = img.shape[:2]
+            
+            # Calculate scaled dimensions based on table size
+            table_x, table_y, table_width, table_height = table_rect
+            scale_factor = min(table_width / 800, table_height / 600)
+            
+            # Scale card dimensions
+            card_width = int(self.card_width * scale_factor)
+            card_height = int(self.card_height * scale_factor)
+            
+            # Scale chip region dimensions
+            chip_width = int(self.chip_region_width * scale_factor)
+            chip_height = int(self.chip_region_height * scale_factor)
+            
+            # Scale bet region dimensions
+            bet_width = int(self.bet_region_width * scale_factor)
+            bet_height = int(self.bet_region_height * scale_factor)
+            
+            # Scale pot region dimensions
+            pot_width = int(self.pot_region_width * scale_factor)
+            pot_height = int(self.pot_region_height * scale_factor)
+            
+            # Get table center
+            cx, cy = table_center
+            
+            # Create ROI configuration
+            roi = {}
+            
+            # Calibrate community cards (in the center of the table)
+            community_spacing = int(card_width * 1.2)
+            first_card_x = cx - (community_spacing * 2)
+            roi['community_cards'] = [
+                (first_card_x, cy - card_height // 2, card_width, card_height),
+                (first_card_x + community_spacing, cy - card_height // 2, card_width, card_height),
+                (first_card_x + community_spacing * 2, cy - card_height // 2, card_width, card_height),
+                (first_card_x + community_spacing * 3, cy - card_height // 2, card_width, card_height),
+                (first_card_x + community_spacing * 4, cy - card_height // 2, card_width, card_height)
+            ]
+            
+            # Detect player positions
+            player_positions = self.table_detector.detect_player_positions(img, table_center)
+            
+            if not player_positions:
+                self.logger.warning("Could not detect player positions, using default patterns")
+                # Generate positions in a circle around the table
+                angles = np.linspace(0, 2*np.pi, 9, endpoint=False)
+                angles = (angles + np.pi/2) % (2*np.pi)  # Start at bottom center
+                
+                table_radius_x = table_width // 2
+                table_radius_y = table_height // 2
+                
+                player_positions = []
+                for angle in angles:
+                    x = cx + int(table_radius_x * 0.8 * np.cos(angle))
+                    y = cy + int(table_radius_y * 0.8 * np.sin(angle))
+                    player_positions.append((x, y))
+            
+            # Calibrate player cards
+            roi['player_cards'] = {}
+            for i, (px, py) in enumerate(player_positions, 1):
+                # For player 1 (main player at bottom center)
+                if i == 1:
+                    card_spacing = int(card_width * 1.1)
+                    roi['player_cards'][i] = [
+                        (px - card_spacing // 2, py, card_width, card_height),
+                        (px + card_spacing // 2, py, card_width, card_height)
+                    ]
+            
+            # Calibrate player chips
+            roi['player_chips'] = {}
+            for i, (px, py) in enumerate(player_positions, 1):
+                chip_offset_y = int(card_height * 0.8)  # Place chips below cards
+                roi['player_chips'][i] = [(px - chip_width // 2, py + chip_offset_y, chip_width, chip_height)]
+            
+            # Special region for main player's chips (more precise)
+            roi['main_player_chips'] = [(
+                player_positions[0][0] - chip_width // 2,
+                player_positions[0][1] + int(card_height * 1.0),
+                chip_width,
+                chip_height
+            )]
+            
+            # Calibrate current bets
+            roi['current_bets'] = {}
+            for i, (px, py) in enumerate(player_positions, 1):
+                bet_offset_y = int(card_height * 0.4)  # Place bet above cards
+                roi['current_bets'][i] = [(px - bet_width // 2, py - bet_offset_y, bet_width, bet_height)]
+            
+            # Calibrate pot (in the center, above community cards)
+            pot_offset_y = int(card_height * 0.8)
+            roi['pot'] = [(cx - pot_width // 2, cy - card_height - pot_offset_y, pot_width, pot_height)]
+            
+            # Calibrate game stage regions (above community cards)
+            game_stage_offset_y = int(card_height * 1.2)
+            game_stage_width = int(80 * scale_factor)
+            game_stage_height = int(25 * scale_factor)
+            
+            roi['game_stage'] = [
+                (cx - game_stage_width - 10, cy - card_height - game_stage_offset_y, game_stage_width, game_stage_height),
+                (cx + 10, cy - card_height - game_stage_offset_y, game_stage_width, game_stage_height)
+            ]
+            
+            # Calibrate action buttons (bottom center, below main player)
+            action_width = int(80 * scale_factor)
+            action_height = int(20 * scale_factor)
+            main_x, main_y = player_positions[0]  # Main player position
+            
+            action_spacing = int(action_height * 2.5)
+            roi['actions'] = {
+                'raise': [(main_x, main_y + card_height + chip_height + action_spacing, action_width, action_height)],
+                'call': [(main_x, main_y + card_height + chip_height + action_spacing * 2, action_width, action_height)],
+                'fold': [(main_x, main_y + card_height + chip_height + action_spacing * 3, action_width, action_height)]
+            }
+            
+            return roi
+        
+        except Exception as e:
+            self.logger.error(f"Error calibrating ROI: {str(e)}")
+            return self._get_default_roi()
+    
+    def calibrate_and_save(self, img, output_file="roi_config.json"):
+        """
+        Calibrate and save ROI configuration to a file
+        
+        Args:
+            img: Source image
+            output_file: Path to save the configuration
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            roi = self.calibrate_roi(img)
+            
+            # Convert tuple keys to strings for JSON serialization
+            json_roi = self._convert_to_json_serializable(roi)
+            
+            with open(output_file, 'w') as f:
+                json.dump(json_roi, f, indent=2)
+            
+            self.logger.info(f"ROI configuration saved to {output_file}")
+            return True
+        
+        except Exception as e:
+            self.logger.error(f"Error saving ROI configuration: {str(e)}")
+            return False
+    
+    def _convert_to_json_serializable(self, roi):
+        """Convert ROI dict to be JSON serializable"""
+        # Create a deep copy of the ROI
+        result = {}
+        
+        for key, value in roi.items():
+            if isinstance(value, dict):
+                # Handle nested dicts (like player_cards, player_chips)
+                result[key] = {}
+                for subkey, subvalue in value.items():
+                    result[key][str(subkey)] = subvalue
+            else:
+                result[key] = value
+        
+        return result
+    
+    def load_and_apply_roi(self, img, roi_file="roi_config.json"):
+        """
+        Load ROI from file and adjust to current image dimensions
+        
+        Args:
+            img: Source image
+            roi_file: Path to ROI configuration file
+            
+        Returns:
+            dict: Adjusted ROI configuration
+        """
+        try:
+            if os.path.exists(roi_file):
+                with open(roi_file, 'r') as f:
+                    roi = json.load(f)
+                
+                # Detect the poker table
+                table_contour, table_rect, table_center = self.table_detector.detect_table(img)
+                
+                if table_center is None:
+                    self.logger.warning("Could not detect poker table, using loaded ROI without adjustment")
+                    return roi
+                
+                # Get image dimensions
+                h, w = img.shape[:2]
+                
+                # Get table dimensions
+                table_x, table_y, table_width, table_height = table_rect
+                
+                # Adjust the loaded ROI to the current table dimensions
+                adjusted_roi = self._adjust_roi_to_current_table(roi, table_center, table_width, table_height, w, h)
+                
+                return adjusted_roi
+            else:
+                self.logger.warning(f"ROI file {roi_file} not found, calibrating new ROI")
+                return self.calibrate_roi(img)
+        
+        except Exception as e:
+            self.logger.error(f"Error loading and applying ROI: {str(e)}")
+            return self._get_default_roi()
+    
+    def _adjust_roi_to_current_table(self, roi, table_center, table_width, table_height, image_width, image_height):
+        """Adjust loaded ROI to current table dimensions"""
+        # Get table center
+        cx, cy = table_center
+        
+        # Create a copy of the ROI
+        adjusted_roi = {}
+        
+        # Default reference dimensions
+        ref_width = 800
+        ref_height = 600
+        
+        # Calculate scale factors
+        scale_x = table_width / ref_width
+        scale_y = table_height / ref_height
+        
+        # Adjust each region type
+        for region_type, regions in roi.items():
+            if isinstance(regions, list):
+                # Simple list of regions (like community_cards)
+                adjusted_roi[region_type] = []
+                
+                for region in regions:
+                    x, y, w, h = region
+                    
+                    # Adjust coordinates relative to table center
+                    adj_x = int(cx + (x - ref_width/2) * scale_x)
+                    adj_y = int(cy + (y - ref_height/2) * scale_y)
+                    adj_w = int(w * scale_x)
+                    adj_h = int(h * scale_y)
+                    
+                    # Ensure within image bounds
+                    adj_x = max(0, min(image_width-1, adj_x))
+                    adj_y = max(0, min(image_height-1, adj_y))
+                    adj_w = min(adj_w, image_width - adj_x)
+                    adj_h = min(adj_h, image_height - adj_y)
+                    
+                    adjusted_roi[region_type].append((adj_x, adj_y, adj_w, adj_h))
+            
+            elif isinstance(regions, dict):
+                # Nested dict (like player_cards, player_chips)
+                adjusted_roi[region_type] = {}
+                
+                for player_id, player_regions in regions.items():
+                    # Convert string keys back to integers if needed
+                    player_id = int(player_id) if player_id.isdigit() else player_id
+                    
+                    adjusted_roi[region_type][player_id] = []
+                    
+                    for region in player_regions:
+                        x, y, w, h = region
+                        
+                        # Adjust coordinates relative to table center
+                        adj_x = int(cx + (x - ref_width/2) * scale_x)
+                        adj_y = int(cy + (y - ref_height/2) * scale_y)
+                        adj_w = int(w * scale_x)
+                        adj_h = int(h * scale_y)
+                        
+                        # Ensure within image bounds
+                        adj_x = max(0, min(image_width-1, adj_x))
+                        adj_y = max(0, min(image_height-1, adj_y))
+                        adj_w = min(adj_w, image_width - adj_x)
+                        adj_h = min(adj_h, image_height - adj_y)
+                        
+                        adjusted_roi[region_type][player_id].append((adj_x, adj_y, adj_w, adj_h))
+        
+        return adjusted_roi
+    
+    def _get_default_roi(self):
+        """Get default ROI configuration"""
+        return {
+            # Community cards area
+            'community_cards': [
+                (390, 220, 45, 65),  # First card
+                (450, 220, 45, 65),  # Second card
+                (510, 220, 45, 65),  # Third card
+                (570, 220, 45, 65),  # Fourth card
+                (630, 220, 45, 65)   # Fifth card
+            ],
+            
+            # Player cards area
+            'player_cards': {
+                1: [(510, 330, 45, 65), (560, 330, 45, 65)]  # Main player's cards
+            },
+            
+            # Chip counts
+            'player_chips': {
+                1: [(280, 380, 80, 20)],   # Player 1 (bottom center)
+                2: [(90, 345, 80, 20)],    # Player 2 (bottom left)
+                3: [(80, 90, 80, 20)],     # Player 3 (middle left)
+                4: [(280, 40, 80, 20)],    # Player 4 (top left)
+                5: [(420, 40, 80, 20)],    # Player 5 (top center)
+                6: [(550, 40, 80, 20)],    # Player 6 (top right)
+                7: [(730, 90, 80, 20)],    # Player 7 (middle right)
+                8: [(730, 345, 80, 20)],   # Player 8 (bottom right)
+                9: [(550, 380, 80, 20)]    # Player 9 (bottom center right)
+            },
+            
+            # Main player chips
+            'main_player_chips': [(280, 392, 100, 25)],
+            
+            # Current bets
+            'current_bets': {
+                1: [(280, 350, 70, 20)],   # Player 1 current bet
+                2: [(120, 320, 70, 20)],   # Player 2 current bet
+                3: [(120, 120, 70, 20)],   # Player 3 current bet
+                4: [(280, 70, 70, 20)],    # Player 4 current bet
+                5: [(400, 70, 70, 20)],    # Player 5 current bet
+                6: [(520, 70, 70, 20)],    # Player 6 current bet
+                7: [(680, 120, 70, 20)],   # Player 7 current bet
+                8: [(680, 320, 70, 20)],   # Player 8 current bet
+                9: [(520, 350, 70, 20)]    # Player 9 current bet
+            },
+            
+            # Game stage indicators
+            'game_stage': [
+                (265, 197, 80, 25),  # Game stage text (Preflop, Flop, Turn, River)
+                (720, 197, 80, 25)   # Alternative location for game stage
+            ],
+            
+            # Pot information
+            'pot': [(280, 248, 100, 20)],  # Pot size area
+            
+            # Action buttons
+            'actions': {
+                'raise': [(510, 480, 80, 20)],  # Raise button/amount
+                'call': [(510, 530, 80, 20)],   # Call button/amount
+                'fold': [(510, 580, 80, 20)]    # Fold button
+            }
+        }
 
 class PokerScreenGrabber:
     def __init__(self, capture_interval=2.0, output_dir="poker_data"):
@@ -155,52 +671,23 @@ class PokerScreenGrabber:
         # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
         
-        # PokerTH-specific regions of interest
-        # Calibrated for the screenshot provided
-        self.roi = {
-            # Community cards area
-            'community_cards': [
-                (390, 220, 45, 65),  # First card
-                (450, 220, 45, 65),  # Second card
-                (510, 220, 45, 65),  # Third card
-                (570, 220, 45, 65),  # Fourth card
-                (630, 220, 45, 65)   # Fifth card
-            ],
-            
-            # Player cards area
-            'player_cards': {
-                1: [(510, 330, 45, 65), (560, 330, 45, 65)]  # Main player's cards (player at position 1)
-            },
-            
-            # Chip counts - positions align with the 9 seats at the table
-            'player_chips': {
-                1: [(280, 380, 80, 20)],   # Player 1 (bottom center)
-                2: [(90, 345, 80, 20)],    # Player 2 (bottom left)
-                3: [(80, 90, 80, 20)],     # Player 3 (middle left)
-                4: [(280, 40, 80, 20)],    # Player 4 (top left)
-                5: [(420, 40, 80, 20)],    # Player 5 (top center)
-                6: [(550, 40, 80, 20)],    # Player 6 (top right)
-                7: [(730, 90, 80, 20)],    # Player 7 (middle right)
-                8: [(730, 345, 80, 20)],   # Player 8 (bottom right)
-                9: [(550, 380, 80, 20)]    # Player 9 (bottom center right)
-            },
-            
-            # Pot information
-            'pot': [(280, 248, 100, 20)],  # Pot size area
-            
-            # Game information
-            'game_info': [(720, 227, 80, 40)],  # Game/hand number
-            
-            # Player actions
-            'actions': {
-                'raise': [(510, 480, 80, 20)],  # Raise button/amount
-                'call': [(510, 530, 80, 20)],   # Call button/amount
-                'fold': [(510, 580, 80, 20)]    # Fold button
-            }
-        }
+        # Create ROI calibrator
+        self.roi_calibrator = AutoROICalibrator()
         
-        # Current game state
-        self.current_state = GameState()
+        # Initialize with default ROI
+        self.roi = self._get_default_roi()
+        
+        # Show debugging overlay by default
+        self.show_debug_overlay = True
+        
+        # Load ROI from file if available
+        roi_file = "roi_config.json"
+        if os.path.exists(roi_file):
+            self.load_regions_from_file(roi_file)
+        
+        # Current game state and debug info
+        self.current_state = None
+        self.last_detection_info = {}
     
     def get_window_list(self):
         """Get a list of all visible windows"""
@@ -260,6 +747,12 @@ class PokerScreenGrabber:
                         self.window_handle = window.handle
                         self.window_rect = window.rect
                         logger.info(f"Selected window by title: {window.title}")
+                        
+                        # Take a screenshot and calibrate ROI
+                        screenshot = self.capture_screenshot()
+                        if screenshot is not None:
+                            self.calibrate_roi_from_screenshot(screenshot)
+                        
                         return True
                 
                 logger.warning(f"Window not found by title: {window_info}")
@@ -270,6 +763,12 @@ class PokerScreenGrabber:
                 self.window_handle = window_info.handle
                 self.window_rect = window_info.rect
                 logger.info(f"Selected window by object: {window_info.title}")
+                
+                # Take a screenshot and calibrate ROI
+                screenshot = self.capture_screenshot()
+                if screenshot is not None:
+                    self.calibrate_roi_from_screenshot(screenshot)
+                
                 return True
         except Exception as e:
             logger.error(f"Error selecting window: {str(e)}", exc_info=True)
@@ -335,7 +834,8 @@ class PokerScreenGrabber:
                     img = self.capture_window(hwnd=self.window_handle)
                     if img is not None:
                         # Add debugging overlay
-                        img = self.add_debugging_overlay(img)
+                        if self.show_debug_overlay:
+                            img = self.add_debugging_overlay(img)
                         return img
                     logger.warning("Windows-specific capture failed, falling back to region capture")
                 
@@ -344,7 +844,8 @@ class PokerScreenGrabber:
                     img = self.capture_window(rect=self.window_rect)
                     if img is not None:
                         # Add debugging overlay
-                        img = self.add_debugging_overlay(img)
+                        if self.show_debug_overlay:
+                            img = self.add_debugging_overlay(img)
                         return img
                     logger.warning("Region capture failed, falling back to mock screenshot")
                 
@@ -352,13 +853,15 @@ class PokerScreenGrabber:
                 logger.info("Using mock screenshot as fallback")
                 img = self.create_mock_screenshot()
                 # Add debugging overlay
-                img = self.add_debugging_overlay(img)
+                if self.show_debug_overlay:
+                    img = self.add_debugging_overlay(img)
                 return img
             else:
                 logger.warning("No window selected for capture - using mock screenshot")
                 img = self.create_mock_screenshot()
                 # Add debugging overlay
-                img = self.add_debugging_overlay(img)
+                if self.show_debug_overlay:
+                    img = self.add_debugging_overlay(img)
                 return img
         
         except Exception as e:
@@ -367,7 +870,8 @@ class PokerScreenGrabber:
             img = self.create_mock_screenshot()
             # Add debugging overlay - try/except to ensure we return something even if overlay fails
             try:
-                img = self.add_debugging_overlay(img)
+                if self.show_debug_overlay:
+                    img = self.add_debugging_overlay(img)
             except:
                 pass
             return img
@@ -386,306 +890,147 @@ class PokerScreenGrabber:
             logger.info(f"Screenshot saved to {filepath}")
         except Exception as e:
             logger.error(f"Error saving screenshot: {str(e)}")
-
-    def process_screenshot(self, img):
+    
+    def calibrate_roi_from_screenshot(self, img=None):
         """
-        Process a screenshot to extract game state
+        Calibrate ROI from current screenshot
         
         Args:
-            img: Screenshot image as numpy array
-        
+            img: Screenshot to use for calibration, or None to capture new screenshot
+            
         Returns:
-            GameState: Updated game state
+            bool: True if calibration was successful
         """
         try:
-            # Create a new game state
-            game_state = GameState()
-            game_state.timestamp = datetime.datetime.now().isoformat()
-            game_state.hand_number = 1
-            
-            # Detect game stage
-            game_stage = self.detect_game_stage(img)
-            logger.info(f"Detected game stage: {game_stage}")
-            
-            # Extract pot size
-            pot_region = self.roi['pot'][0]
-            x, y, w, h = pot_region
-            if 0 <= x < img.shape[1] and 0 <= y < img.shape[0] and x+w <= img.shape[1] and y+h <= img.shape[0]:
-                pot_img = img[y:y+h, x:x+w]
-                # In a real implementation, use OCR to extract pot size
-                game_state.pot_size = 200 if game_stage == 'preflop' else 840
+            if img is None:
+                img = self.capture_screenshot()
+                
+            if img is not None:
+                self.roi = self.roi_calibrator.calibrate_roi(img)
+                self.save_regions_to_file("roi_config.json")
+                logger.info("ROI calibrated successfully")
+                return True
             else:
-                game_state.pot_size = 200 if game_stage == 'preflop' else 840  # Default based on game phase
-            
-            # Extract community cards based on game stage
-            if game_stage != 'preflop':
-                visible_cards = 3 if game_stage == 'flop' else 4 if game_stage == 'turn' else 5
-                
-                for i, card_region in enumerate(self.roi['community_cards']):
-                    if i >= visible_cards:
-                        break  # Only process visible cards
-                    
-                    x, y, w, h = card_region
-                    if 0 <= x < img.shape[1] and 0 <= y < img.shape[0] and x+w <= img.shape[1] and y+h <= img.shape[0]:
-                        card_img = img[y:y+h, x:x+w]
-                        
-                        # In a real implementation, detect the card from the image
-                        # For now, use values based on the sample and visible cards count
-                        if i == 0:
-                            game_state.community_cards.append(Card(CardValue.TEN, CardSuit.DIAMONDS))
-                        elif i == 1:
-                            game_state.community_cards.append(Card(CardValue.ACE, CardSuit.DIAMONDS))
-                        elif i == 2:
-                            game_state.community_cards.append(Card(CardValue.JACK, CardSuit.HEARTS))
-                        elif i == 3:
-                            game_state.community_cards.append(Card(CardValue.THREE, CardSuit.DIAMONDS))
-                        elif i == 4:
-                            game_state.community_cards.append(Card(CardValue.SIX, CardSuit.CLUBS))
-            
-            # Extract main player chips
-            main_player_chips = self.extract_main_player_chips(img)
-            
-            # Extract current bets
-            current_bets = self.extract_current_bets(img)
-            
-            # Create players and extract chip counts
-            player_chips = {
-                1: main_player_chips if main_player_chips > 0 else 4980,  # Use precisely detected chips if available
-                2: 4980,  # Player 2 (bottom left)
-                3: 4980,  # Player 3 (middle left)
-                4: 4820,  # Player 4 (top left)
-                5: 4980,  # Player 5 (top center)
-                6: 4980,  # Player 6 (top right)
-                7: 4660,  # Player 7 (middle right)
-                8: 4660,  # Player 8 (bottom right)
-                9: 4980   # Player 9 (bottom center right)
-            }
-            
-            for pos, chips in player_chips.items():
-                player = Player(position=pos, chips=chips)
-                
-                # Add current bet if available
-                if pos in current_bets:
-                    player.bet_amount = current_bets[pos]
-                    # You might also want to infer player.last_action based on bet amount
-                
-                game_state.players[pos] = player
-            
-            # Add player cards - only for the main player (position 1)
-            if 1 in game_state.players:
-                player = game_state.players[1]
-                
-                # Check if player cards are visible
-                player_cards_visible = [False, False]
-                player_card_regions = self.roi['player_cards'][1]
-                
-                for i, card_region in enumerate(player_card_regions):
-                    if i >= 2:  # Only checking 2 cards
-                        break
-                    
-                    x, y, w, h = card_region
-                    if 0 <= x < img.shape[1] and 0 <= y < img.shape[0] and x+w <= img.shape[1] and y+h <= img.shape[0]:
-                        card_img = img[y:y+h, x:x+w]
-                        
-                        # Check if this region contains a card
-                        player_cards_visible[i] = self._is_card_present(card_img)
-                
-                logger.info(f"Player cards detected: {player_cards_visible}")
-                
-                # If at least one player card is visible, add both cards (assuming they come as a pair)
-                if any(player_cards_visible):
-                    # In preflop, use a typical strong starting hand
-                    if game_stage == 'preflop':
-                        player.cards = [
-                            Card(CardValue.ACE, CardSuit.SPADES),
-                            Card(CardValue.ACE, CardSuit.HEARTS)
-                        ]
-                    else:
-                        # In postflop, use the specific hand from the sample
-                        player.cards = [
-                            Card(CardValue.TEN, CardSuit.CLUBS),
-                            Card(CardValue.JACK, CardSuit.DIAMONDS)
-                        ]
-            
-            # Set game positions from the sample
-            game_state.small_blind_position = 7  # Player 7 has small blind
-            game_state.big_blind_position = 8    # Player 8 has big blind
-            game_state.dealer_position = 9       # Player 9 is dealer
-            game_state.current_player = 1        # Player 1 is the current player
-            
-            # Store game stage
-            game_state.game_stage = game_stage
-            
-            self.current_state = game_state
-            return game_state
-            
+                logger.warning("Failed to capture screenshot for ROI calibration")
+                return False
         except Exception as e:
-            logger.error(f"Error processing screenshot: {str(e)}", exc_info=True)
-            
-            # Create a default game state based on sample
-            game_state = GameState()
-            game_state.timestamp = datetime.datetime.now().isoformat()
-            game_state.hand_number = 1
-            game_state.pot_size = 200  # Default to preflop pot
-            game_state.game_stage = 'preflop'  # Default game stage
-            
-            # Create players with positions and chips
-            for pos in range(1, 10):
-                chips = 4820 if pos == 4 else 4660 if pos in [7, 8] else 4980
-                player = Player(position=pos, chips=chips)
-                game_state.players[pos] = player
-            
-            # Add player cards for main player (position 1)
-            player = game_state.players[1]
-            player.cards = [
-                Card(CardValue.ACE, CardSuit.SPADES),
-                Card(CardValue.ACE, CardSuit.HEARTS)
-            ]
-            
-            # Set positions
-            game_state.small_blind_position = 7
-            game_state.big_blind_position = 8
-            game_state.dealer_position = 9
-            game_state.current_player = 1
-            
-            self.current_state = game_state
-            return game_state
-
-    def get_current_state(self):
-        """
-        Get the current game state
-        
-        Returns:
-            dict: Game state as a dictionary
-        """
-        return self.current_state.to_dict()
+            logger.error(f"Error calibrating ROI: {str(e)}", exc_info=True)
+            return False
     
-    def start_capture(self):
-        """Start continuous screen capturing"""
-        if self.is_capturing:
-            return
-        
-        self.is_capturing = True
-        self.capture_thread = threading.Thread(target=self.capture_loop)
-        self.capture_thread.daemon = True
-        self.capture_thread.start()
-        logger.info("Started continuous capture")
+    def save_regions_to_file(self, filename="roi_config.json"):
+        """Save the current ROI configuration to a file"""
+        try:
+            # Convert ROI to a JSON-serializable format
+            json_roi = self.roi_calibrator._convert_to_json_serializable(self.roi)
+            
+            with open(filename, 'w') as f:
+                json.dump(json_roi, f, indent=2)
+            logger.info(f"ROI configuration saved to {filename}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save ROI configuration: {str(e)}")
+            return False
     
-    def stop_capture(self):
-        """Stop continuous screen capturing"""
-        self.is_capturing = False
-        if self.capture_thread:
-            self.capture_thread.join(timeout=2.0)
-            self.capture_thread = None
-        logger.info("Stopped continuous capture")
-    
-    def capture_loop(self):
-        """Continuously capture screenshots and process them"""
-        while self.is_capturing:
-            try:
-                # Capture screenshot
-                screenshot = self.capture_screenshot()
+    def load_regions_from_file(self, filename="roi_config.json"):
+        """Load ROI configuration from a file"""
+        try:
+            if os.path.exists(filename):
+                with open(filename, 'r') as f:
+                    loaded_roi = json.load(f)
                 
-                if screenshot is not None:
-                    # Generate timestamp
-                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    
-                    # Save screenshot
-                    screenshot_path = os.path.join(
-                        self.output_dir,
-                        f"screenshot_{timestamp}.png"
-                    )
-                    self.save_screenshot(screenshot, screenshot_path)
-                    
-                    # Process screenshot to update game state
-                    self.process_screenshot(screenshot)
+                # Convert string player IDs to integers
+                for key in ['player_cards', 'player_chips', 'current_bets']:
+                    if key in loaded_roi:
+                        loaded_roi[key] = {int(k) if k.isdigit() else k: v for k, v in loaded_roi[key].items()}
                 
-                # Sleep until next capture
-                time.sleep(self.capture_interval)
-            except Exception as e:
-                logger.error(f"Error in capture loop: {str(e)}")
-                time.sleep(1.0)  # Sleep before retrying
+                self.roi = loaded_roi
+                logger.info(f"ROI configuration loaded from {filename}")
+                return True
+            else:
+                logger.warning(f"ROI configuration file not found: {filename}")
+        except Exception as e:
+            logger.error(f"Failed to load ROI configuration: {str(e)}")
+        
+        # If we get here, loading failed - use default ROI
+        self.roi = self._get_default_roi()
+        return False
     
-    def calibrate_for_table_size(self, img):
+    def _detect_card(self, img, card_region):
         """
-        Calibrate regions of interest based on the detected table size
+        Detect a card in the given region
         
         Args:
-            img: Screenshot image to calibrate from
+            img: Source image
+            card_region: Region tuple (x, y, w, h)
+            
+        Returns:
+            tuple: (value, suit) or (None, None) if no card detected
+        """
+        # Simple card detection - for real implementation, use a more sophisticated method
+        # This is a placeholder for the improved card detection that would be implemented
+        try:
+            x, y, w, h = card_region
+            
+            # Ensure region is within image bounds
+            if x >= 0 and y >= 0 and x+w <= img.shape[1] and y+h <= img.shape[0]:
+                card_img = img[y:y+h, x:x+w]
+                
+                # Check if a card is present
+                if self._is_card_visible(card_img):
+                    from improved_poker_cv_analyzer import ImprovedCardDetector
+                    detector = ImprovedCardDetector()
+                    return detector.detect_card(card_img)
+            
+            return None, None
+        except Exception as e:
+            logger.error(f"Error detecting card: {str(e)}")
+            return None, None
+    
+    def _is_card_visible(self, card_img):
+        """Check if a card is visible (not folded or hidden)"""
+        if card_img is None or card_img.size == 0:
+            return False
+        
+        # Convert to grayscale
+        gray = cv2.cvtColor(card_img, cv2.COLOR_BGR2GRAY)
+        
+        # Threshold to find white areas (cards are mostly white)
+        _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+        
+        # Count white pixels
+        white_pixels = cv2.countNonZero(thresh)
+        total_pixels = card_img.shape[0] * card_img.shape[1]
+        
+        # If more than 40% of pixels are white, it's likely a card
+        return white_pixels > (total_pixels * 0.4)
+    
+    def _detect_chip_count(self, img, chip_region):
+        """
+        Detect chip count from the given region
+        
+        Args:
+            img: Source image
+            chip_region: Region tuple (x, y, w, h)
+            
+        Returns:
+            int: Detected chip count or 0
         """
         try:
-            # Detect green poker table using color thresholds
-            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-            # Green color range
-            lower_green = np.array([35, 50, 50])
-            upper_green = np.array([85, 255, 255])
-            mask = cv2.inRange(hsv, lower_green, upper_green)
+            x, y, w, h = chip_region
             
-            # Find contours
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            if contours:
-                # Find the largest contour (the poker table)
-                table_contour = max(contours, key=cv2.contourArea)
-                x, y, w, h = cv2.boundingRect(table_contour)
+            # Ensure region is within image bounds
+            if x >= 0 and y >= 0 and x+w <= img.shape[1] and y+h <= img.shape[0]:
+                chip_img = img[y:y+h, x:x+w]
                 
-                # Adjust ROIs based on table dimensions
-                self._adjust_roi_for_table(x, y, w, h)
-                logger.info(f"Calibrated ROIs for table at ({x}, {y}) with size {w}x{h}")
-            else:
-                logger.warning("No green table detected for calibration")
+                from improved_poker_cv_analyzer import EnhancedTextRecognition
+                text_recognizer = EnhancedTextRecognition()
+                return text_recognizer.extract_chip_count(img, chip_region)
+            
+            return 0
         except Exception as e:
-            logger.error(f"Error in table calibration: {str(e)}")
+            logger.error(f"Error detecting chip count: {str(e)}")
+            return 0
     
-    def _adjust_roi_for_table(self, table_x, table_y, table_width, table_height):
-        """
-        Adjust regions of interest based on detected table position and size
-        
-        Args:
-            table_x: X coordinate of table bounding box
-            table_y: Y coordinate of table bounding box
-            table_width: Width of table bounding box
-            table_height: Height of table bounding box
-        """
-        # Calculate center of table
-        center_x = table_x + table_width // 2
-        center_y = table_y + table_height // 2
-        
-        # Scale factor for ROI positions
-        scale_x = table_width / 800  # Assume 800px is the reference width
-        scale_y = table_height / 600  # Assume 600px is the reference height
-        
-        # Adjust community cards position
-        for i in range(len(self.roi['community_cards'])):
-            ref_x, ref_y, w, h = self.roi['community_cards'][i]
-            # Adjust from center and scale
-            offset_x = (ref_x - 400) * scale_x
-            offset_y = (ref_y - 300) * scale_y
-            
-            self.roi['community_cards'][i] = (
-                int(center_x + offset_x),
-                int(center_y + offset_y),
-                int(w * scale_x),
-                int(h * scale_y)
-            )
-        
-        # Adjust player positions similarly
-        for pos in self.roi['player_cards']:
-            for i in range(len(self.roi['player_cards'][pos])):
-                ref_x, ref_y, w, h = self.roi['player_cards'][pos][i]
-                offset_x = (ref_x - 400) * scale_x
-                offset_y = (ref_y - 300) * scale_y
-                
-                self.roi['player_cards'][pos][i] = (
-                    int(center_x + offset_x),
-                    int(center_y + offset_y),
-                    int(w * scale_x),
-                    int(h * scale_y)
-                )
-        
-        # Adjust chip counts and other ROIs...
-        # (Similar adjustments for other ROIs would follow the same pattern)
-
     def add_debugging_overlay(self, img):
         """
         Add visual debugging information to the screenshot showing analyzed regions
@@ -697,9 +1042,6 @@ class PokerScreenGrabber:
             numpy.ndarray: Annotated screenshot with debugging information
         """
         # Check if debugging overlay is enabled
-        if not hasattr(self, 'show_debug_overlay'):
-            self.show_debug_overlay = True  # Default to showing overlay
-        
         if not self.show_debug_overlay:
             return img  # Return original image if overlay is disabled
         
@@ -720,34 +1062,37 @@ class PokerScreenGrabber:
             }
             
             # Draw community card regions
-            for i, region in enumerate(self.roi['community_cards']):
-                x, y, w, h = region
-                cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['community_cards'], 2)
-                cv2.putText(debug_img, f"Community {i+1}", (x, y-5), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['community_cards'], 1)
+            if 'community_cards' in self.roi:
+                for i, region in enumerate(self.roi['community_cards']):
+                    x, y, w, h = region
+                    cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['community_cards'], 2)
+                    cv2.putText(debug_img, f"CC {i+1}", (x, y-5), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['community_cards'], 1)
             
             # Draw player card regions
-            for player_id, regions in self.roi['player_cards'].items():
-                for i, region in enumerate(regions):
-                    x, y, w, h = region
-                    cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['player_cards'], 2)
-                    cv2.putText(debug_img, f"P{player_id} Card {i+1}", (x, y-5), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['player_cards'], 1)
+            if 'player_cards' in self.roi:
+                for player_id, regions in self.roi['player_cards'].items():
+                    for i, region in enumerate(regions):
+                        x, y, w, h = region
+                        cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['player_cards'], 2)
+                        cv2.putText(debug_img, f"P{player_id} C{i+1}", (x, y-5), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['player_cards'], 1)
             
             # Draw player chip regions
-            for player_id, regions in self.roi['player_chips'].items():
-                for i, region in enumerate(regions):
-                    x, y, w, h = region
-                    cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['player_chips'], 2)
-                    cv2.putText(debug_img, f"P{player_id} Chips", (x, y-5), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['player_chips'], 1)
+            if 'player_chips' in self.roi:
+                for player_id, regions in self.roi['player_chips'].items():
+                    for i, region in enumerate(regions):
+                        x, y, w, h = region
+                        cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['player_chips'], 2)
+                        cv2.putText(debug_img, f"P{player_id} $", (x, y-5), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['player_chips'], 1)
             
             # Draw main player chips region
             if 'main_player_chips' in self.roi:
                 for i, region in enumerate(self.roi['main_player_chips']):
                     x, y, w, h = region
                     cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['main_player_chips'], 2)
-                    cv2.putText(debug_img, "Main Player $", (x, y-5), 
+                    cv2.putText(debug_img, "Main $", (x, y-5), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['main_player_chips'], 1)
             
             # Draw current bets regions
@@ -764,15 +1109,16 @@ class PokerScreenGrabber:
                 for i, region in enumerate(self.roi['game_stage']):
                     x, y, w, h = region
                     cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['game_stage'], 2)
-                    cv2.putText(debug_img, f"Game Stage {i+1}", (x, y-5), 
+                    cv2.putText(debug_img, f"Stage {i+1}", (x, y-5), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['game_stage'], 1)
             
             # Draw pot region
-            for i, region in enumerate(self.roi['pot']):
-                x, y, w, h = region
-                cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['pot'], 2)
-                cv2.putText(debug_img, "Pot", (x, y-5), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['pot'], 1)
+            if 'pot' in self.roi:
+                for i, region in enumerate(self.roi['pot']):
+                    x, y, w, h = region
+                    cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['pot'], 2)
+                    cv2.putText(debug_img, "Pot", (x, y-5), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['pot'], 1)
             
             # Draw action regions
             if 'actions' in self.roi:
@@ -786,32 +1132,33 @@ class PokerScreenGrabber:
             # Add legend
             legend_y = 20
             for region_type, color in colors.items():
-                cv2.putText(debug_img, region_type.replace('_', ' ').title(), (10, legend_y), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                legend_y += 20
+                if region_type in self.roi:
+                    cv2.putText(debug_img, region_type.replace('_', ' ').title(), (10, legend_y), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                    legend_y += 20
             
-            # Add game stage detection result
-            game_stage = self.detect_game_stage(debug_img)
-            cv2.putText(debug_img, f"Detected Stage: {game_stage.upper()}", (10, legend_y + 20), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            
-            # Extract and display main player chips
-            main_player_chips = self.extract_main_player_chips(debug_img)
-            cv2.putText(debug_img, f"Main Player Chips: ${main_player_chips}", (10, legend_y + 50), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            
-            # Extract and display current bets
-            current_bets = self.extract_current_bets(debug_img)
-            bet_str = ", ".join([f"P{p}: ${b}" for p, b in current_bets.items()])
-            cv2.putText(debug_img, f"Current Bets: {bet_str}", (10, legend_y + 80), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            # Add detection info if available
+            if self.last_detection_info:
+                # Add header for detection info
+                cv2.putText(debug_img, "Detection Info:", (10, legend_y + 20), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                legend_y += 40
+                
+                # Display up to 3 detection results
+                count = 0
+                for key, value in self.last_detection_info.items():
+                    if count < 3:
+                        cv2.putText(debug_img, f"{key}: {value}", (10, legend_y), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                        legend_y += 20
+                        count += 1
             
             return debug_img
         
         except Exception as e:
             logger.error(f"Error adding debugging overlay: {str(e)}", exc_info=True)
             return img  # Return original image if error occurs
-
+    
     def _get_default_roi(self):
         """Return the default ROIs for PokerTH"""
         return {
@@ -874,290 +1221,7 @@ class PokerScreenGrabber:
                 'fold': [(510, 580, 80, 20)]    # Fold button
             }
         }
-
-    def save_regions_to_file(self, filename="roi_config.json"):
-        """Save the current ROI configuration to a file"""
-        try:
-            with open(filename, 'w') as f:
-                json.dump(self.roi, f, indent=2)
-            logger.info(f"ROI configuration saved to {filename}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to save ROI configuration: {str(e)}")
-            return False
-
-    def load_regions_from_file(self, filename="roi_config.json"):
-        """Load ROI configuration from a file"""
-        try:
-            if os.path.exists(filename):
-                with open(filename, 'r') as f:
-                    loaded_roi = json.load(f)
-                    
-                    # Validate the loaded ROI
-                    if self._validate_roi(loaded_roi):
-                        self.roi = loaded_roi
-                        logger.info(f"ROI configuration loaded from {filename}")
-                        return True
-                    else:
-                        logger.error(f"Invalid ROI configuration in {filename}")
-            else:
-                logger.warning(f"ROI configuration file not found: {filename}")
-        except Exception as e:
-            logger.error(f"Failed to load ROI configuration: {str(e)}")
-        
-        # If we get here, loading failed - use default ROI
-        self.roi = self._get_default_roi()
-        return False
-
-    def _validate_roi(self, roi):
-        """Validate a ROI configuration"""
-        try:
-            # Check for required keys
-            required_keys = ['community_cards', 'player_cards', 'player_chips', 'pot']
-            for key in required_keys:
-                if key not in roi:
-                    logger.error(f"Missing required key in ROI: {key}")
-                    return False
-            
-            # Check community_cards format
-            if not isinstance(roi['community_cards'], list):
-                logger.error("community_cards must be a list")
-                return False
-            
-            for region in roi['community_cards']:
-                if not (isinstance(region, tuple) or isinstance(region, list)) or len(region) != 4:
-                    logger.error(f"Invalid community card region: {region}")
-                    return False
-            
-            # Check player_cards format
-            if not isinstance(roi['player_cards'], dict):
-                logger.error("player_cards must be a dictionary")
-                return False
-            
-            for player_id, regions in roi['player_cards'].items():
-                if not isinstance(regions, list):
-                    logger.error(f"player_cards[{player_id}] must be a list")
-                    return False
-                
-                for region in regions:
-                    if not (isinstance(region, tuple) or isinstance(region, list)) or len(region) != 4:
-                        logger.error(f"Invalid player card region: {region}")
-                        return False
-            
-            # Similar checks for player_chips and pot
-            # (omitted for brevity)
-            
-            return True
-        
-        except Exception as e:
-            logger.error(f"Error validating ROI: {str(e)}")
-            return False
-
-    def detect_game_stage(self, img):
-        """
-        Detect the current game stage (preflop, flop, turn, river)
-        
-        Args:
-            img: Screenshot image
-        
-        Returns:
-            str: Game stage ('preflop', 'flop', 'turn', 'river')
-        """
-        try:
-            # First approach: OCR-based detection
-            if 'game_stage' in self.roi:
-                for region in self.roi['game_stage']:
-                    x, y, w, h = region
-                    if 0 <= x < img.shape[1] and 0 <= y < img.shape[0] and x+w <= img.shape[1] and y+h <= img.shape[0]:
-                        stage_img = img[y:y+h, x:x+w]
-                        
-                        # Apply preprocessing for better OCR
-                        gray = cv2.cvtColor(stage_img, cv2.COLOR_BGR2GRAY)
-                        _, binary = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-                        
-                        # OCR to extract text
-                        stage_text = pytesseract.image_to_string(binary, config='--psm 7').strip().lower()
-                        
-                        # Check if we got a recognizable stage
-                        for stage in ['preflop', 'flop', 'turn', 'river']:
-                            if stage in stage_text:
-                                logger.info(f"OCR detected game stage: {stage}")
-                                return stage
-            
-            # Second approach: Count visible community cards
-            visible_cards = 0
-            for i, card_region in enumerate(self.roi['community_cards']):
-                x, y, w, h = card_region
-                if 0 <= x < img.shape[1] and 0 <= y < img.shape[0] and x+w <= img.shape[1] and y+h <= img.shape[0]:
-                    card_img = img[y:y+h, x:x+w]
-                    if self._is_card_present(card_img):
-                        visible_cards += 1
-            
-            # Determine stage based on visible card count
-            if visible_cards == 0:
-                return 'preflop'
-            elif visible_cards == 3:
-                return 'flop'
-            elif visible_cards == 4:
-                return 'turn'
-            elif visible_cards == 5:
-                return 'river'
-            else:
-                logger.warning(f"Unexpected number of community cards: {visible_cards}")
-                return 'unknown'
-                
-        except Exception as e:
-            logger.error(f"Error detecting game stage: {str(e)}")
-            return 'unknown'
-
-    def extract_main_player_chips(self, img):
-        """
-        Extract main player's chip count from a more precise region
-        
-        Args:
-            img: Screenshot image
-        
-        Returns:
-            int: Chip count or 0 if not detected
-        """
-        try:
-            if 'main_player_chips' in self.roi and self.roi['main_player_chips']:
-                region = self.roi['main_player_chips'][0]
-                x, y, w, h = region
-                
-                if 0 <= x < img.shape[1] and 0 <= y < img.shape[0] and x+w <= img.shape[1] and y+h <= img.shape[0]:
-                    chip_img = img[y:y+h, x:x+w]
-                    
-                    # Preprocess for OCR
-                    gray = cv2.cvtColor(chip_img, cv2.COLOR_BGR2GRAY)
-                    _, binary = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
-                    
-                    # OCR to extract text
-                    text = pytesseract.image_to_string(
-                        binary, 
-                        config='--psm 7 -c tessedit_char_whitelist=0123456789$,'
-                    ).strip()
-                    
-                    # Extract numeric value
-                    import re
-                    match = re.search(r'[$]?\s*(\d[\d,.]*)', text)
-                    if match:
-                        # Remove commas and convert to int
-                        chips_str = match.group(1).replace(',', '')
-                        try:
-                            return int(chips_str)
-                        except ValueError:
-                            logger.warning(f"Failed to convert chip value to int: {chips_str}")
-                    
-                    # Alternative: color-based detection for yellow text
-                    # This is a more advanced technique that could be implemented
-                    # if OCR is not reliable enough
-                
-                logger.warning("Main player chip region is outside image bounds")
-            
-            return 0  # Default if not detected
-            
-        except Exception as e:
-            logger.error(f"Error extracting main player chips: {str(e)}")
-            return 0
-
-    def extract_current_bets(self, img):
-        """
-        Extract current bets from each player
-        
-        Args:
-            img: Screenshot image
-        
-        Returns:
-            dict: Dictionary mapping player IDs to their current bets
-        """
-        bets = {}
-        
-        try:
-            if 'current_bets' in self.roi:
-                for player_id, regions in self.roi['current_bets'].items():
-                    if not regions:
-                        continue
-                        
-                    region = regions[0]  # Use the first region for each player
-                    x, y, w, h = region
-                    
-                    if 0 <= x < img.shape[1] and 0 <= y < img.shape[0] and x+w <= img.shape[1] and y+h <= img.shape[0]:
-                        bet_img = img[y:y+h, x:x+w]
-                        
-                        # Check if there's actually a bet (presence of yellow/white text)
-                        if not self._is_bet_present(bet_img):
-                            continue
-                        
-                        # Preprocess for OCR
-                        gray = cv2.cvtColor(bet_img, cv2.COLOR_BGR2GRAY)
-                        _, binary = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
-                        
-                        # OCR to extract text
-                        text = pytesseract.image_to_string(
-                            binary, 
-                            config='--psm 7 -c tessedit_char_whitelist=0123456789$,'
-                        ).strip()
-                        
-                        # Extract numeric value
-                        import re
-                        match = re.search(r'[$]?\s*(\d[\d,.]*)', text)
-                        if match:
-                            # Remove commas and convert to int
-                            bet_str = match.group(1).replace(',', '')
-                            try:
-                                bets[player_id] = int(bet_str)
-                            except ValueError:
-                                logger.warning(f"Failed to convert bet value to int: {bet_str}")
-            
-            return bets
-            
-        except Exception as e:
-            logger.error(f"Error extracting current bets: {str(e)}")
-            return bets
-
-    def _is_bet_present(self, bet_img):
-        """
-        Check if a bet is present in the image region
-        
-        Args:
-            bet_img: Image region that might contain a bet
-        
-        Returns:
-            bool: True if a bet is detected, False otherwise
-        """
-        try:
-            if bet_img is None or bet_img.size == 0:
-                return False
-            
-            # Convert to HSV for better color detection
-            hsv = cv2.cvtColor(bet_img, cv2.COLOR_BGR2HSV)
-            
-            # Yellow color range (for bet amounts)
-            lower_yellow = np.array([20, 100, 100])
-            upper_yellow = np.array([40, 255, 255])
-            yellow_mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
-            
-            # White color range (alternative text color)
-            lower_white = np.array([0, 0, 200])
-            upper_white = np.array([180, 30, 255])
-            white_mask = cv2.inRange(hsv, lower_white, upper_white)
-            
-            # Combine masks
-            combined_mask = cv2.bitwise_or(yellow_mask, white_mask)
-            
-            # Count colored pixels
-            colored_pixels = cv2.countNonZero(combined_mask)
-            total_pixels = bet_img.shape[0] * bet_img.shape[1]
-            
-            # If more than 5% of pixels are colored, it's likely a bet
-            return colored_pixels > (total_pixels * 0.05)
-        
-        except Exception as e:
-            logger.error(f"Error checking for bet presence: {str(e)}")
-            return False
-
-
+    
     def create_mock_screenshot(self):
         """
         Create a mock screenshot based on the provided PokerTH screenshot
@@ -1236,6 +1300,15 @@ class PokerScreenGrabber:
                         suit_colors[player_suits[i]], 
                         2)
             
+            # Add player chips
+            cv2.putText(img, "$4980", (280, 392), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            
+            # Add pot
+            cv2.putText(img, "$840", (280, 248), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            
+            # Add game stage
+            cv2.putText(img, "FLOP", (265, 197), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
             # Add "MOCK SCREENSHOT" text
             cv2.putText(
                 img, 
@@ -1257,176 +1330,9 @@ class PokerScreenGrabber:
             cv2.putText(simple_img, "ERROR - FALLBACK IMAGE", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
             return simple_img
 
-
-    def _is_card_present(self, card_img):
-        """
-        Check if an image region contains a card
-        
-        Args:
-            card_img: Image region that might contain a card
-        
-        Returns:
-            bool: True if a card is detected, False otherwise
-        """
-        try:
-            if card_img is None or card_img.size == 0:
-                return False
-            
-            # Convert to grayscale
-            gray = cv2.cvtColor(card_img, cv2.COLOR_BGR2GRAY)
-            
-            # Threshold to find white areas (cards are mostly white)
-            _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-            
-            # Count white pixels
-            white_pixels = cv2.countNonZero(thresh)
-            total_pixels = card_img.shape[0] * card_img.shape[1]
-            
-            # If more than 30% of pixels are white, it's likely a card
-            return white_pixels > (total_pixels * 0.3)
-        
-        except Exception as e:
-            logger.error(f"Error checking for card presence: {str(e)}")
-            return False
-
-
-    def identify_card(self, card_img):
-        """
-        Identify card value and suit from an image region
-        
-        Args:
-            card_img: Image of a card
-            
-        Returns:
-            tuple: (value, suit) as strings
-        """
-        try:
-            if card_img is None or card_img.size == 0:
-                logger.warning("Empty card image provided to identify_card")
-                return None, None
-            
-            # Get image dimensions
-            h, w = card_img.shape[:2]
-            
-            # Split card into top and bottom regions
-            value_region = card_img[0:int(h*0.4), 0:w]  # Top 40% for value
-            suit_region = card_img[int(h*0.4):h, 0:w]   # Bottom 60% for suit
-            
-            # For value detection
-            value_gray = cv2.cvtColor(value_region, cv2.COLOR_BGR2GRAY)
-            _, value_thresh = cv2.threshold(value_gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            
-            # Use OCR to extract value
-            value_text = pytesseract.image_to_string(
-                value_thresh, 
-                config='--psm 10 -c tessedit_char_whitelist=0123456789AJQK'
-            ).strip().upper()
-            
-            # Clean up and interpret value
-            value = self._interpret_card_value(value_text)
-            
-            # For suit detection
-            suit_gray = cv2.cvtColor(suit_region, cv2.COLOR_BGR2GRAY)
-            _, suit_thresh = cv2.threshold(suit_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            
-            # Convert to HSV for color detection
-            suit_hsv = cv2.cvtColor(suit_region, cv2.COLOR_BGR2HSV)
-            
-            # Check for red color (for hearts and diamonds)
-            lower_red1 = np.array([0, 100, 100])
-            upper_red1 = np.array([10, 255, 255])
-            lower_red2 = np.array([170, 100, 100])
-            upper_red2 = np.array([180, 255, 255])
-            
-            red_mask1 = cv2.inRange(suit_hsv, lower_red1, upper_red1)
-            red_mask2 = cv2.inRange(suit_hsv, lower_red2, upper_red2)
-            red_mask = cv2.bitwise_or(red_mask1, red_mask2)
-            
-            is_red_suit = cv2.countNonZero(red_mask) > 0
-            
-            # Use OCR for suit symbol
-            suit_text = pytesseract.image_to_string(
-                suit_thresh, 
-                config='--psm 10 -c tessedit_char_whitelist=♥♦♣♠hdcs'
-            ).strip().lower()
-            
-            # Determine suit
-            suit = self._interpret_card_suit(suit_text, is_red_suit)
-            
-            logger.info(f"Identified card: {value} of {suit}")
-            return value, suit
-            
-        except Exception as e:
-            logger.error(f"Error identifying card: {str(e)}")
-            return None, None
-
-    def _interpret_card_value(self, value_text):
-        """
-        Interpret OCR result for card value
-        
-        Args:
-            value_text: OCR text from value region
-            
-        Returns:
-            str: Card value ('2' through '10', 'J', 'Q', 'K', or 'A')
-        """
-        # Clean up OCR result
-        value_text = value_text.replace('O', '0').replace('o', '0')  # Common OCR errors
-        
-        # Handle '10' specially
-        if '10' in value_text or ('1' in value_text and '0' in value_text):
-            return '10'
-        
-        # Check for face cards and ace
-        if 'A' in value_text:
-            return 'A'
-        elif 'K' in value_text:
-            return 'K'
-        elif 'Q' in value_text:
-            return 'Q'
-        elif 'J' in value_text:
-            return 'J'
-        
-        # For numeric cards, find first digit
-        for char in value_text:
-            if char in '23456789':
-                return char
-        
-        # If all else fails
-        logger.warning(f"Could not interpret card value from text: '{value_text}'")
-        return '2'  # Default fallback
-
-    def _interpret_card_suit(self, suit_text, is_red_suit):
-        """
-        Interpret OCR result for card suit
-        
-        Args:
-            suit_text: OCR text from suit region
-            is_red_suit: Boolean indicating if the suit is red
-            
-        Returns:
-            str: Card suit ('hearts', 'diamonds', 'clubs', or 'spades')
-        """
-        # Check for suit symbols in the text
-        if '♥' in suit_text or 'h' in suit_text:
-            return 'hearts'
-        elif '♦' in suit_text or 'd' in suit_text:
-            return 'diamonds'
-        elif '♣' in suit_text or 'c' in suit_text:
-            return 'clubs'
-        elif '♠' in suit_text or 's' in suit_text:
-            return 'spades'
-        
-        # If OCR failed, use color information
-        if is_red_suit:
-            # For red suits, randomly choose (would use shape detection in production)
-            return 'hearts' if np.random.random() > 0.5 else 'diamonds'
-        else:
-            # For black suits, randomly choose (would use shape detection in production)
-            return 'clubs' if np.random.random() > 0.5 else 'spades'
-
-if __name__ == "__main__":
-    # Standalone test
+# Test function
+def test_screen_grabber():
+    """Test the screen grabber functionality"""
     grabber = PokerScreenGrabber(output_dir="poker_data/screenshots")
     
     # Get available windows
@@ -1437,19 +1343,57 @@ if __name__ == "__main__":
     
     # Select a window (if available)
     if windows:
-        selected_index = 0  # Default to first window
-        selected_window = windows[selected_index]
-        print(f"Selected window: {selected_window}")
-        grabber.select_window(selected_window)
-    
-    # Capture a single screenshot
-    screenshot = grabber.capture_screenshot()
-    if screenshot is not None:
+        try:
+            print("\nSelect a window number:")
+            window_idx = int(input()) - 1
+            
+            if 0 <= window_idx < len(windows):
+                selected_window = windows[window_idx]
+                print(f"Selected window: {selected_window}")
+                grabber.select_window(selected_window)
+                
+                # Capture a screenshot
+                screenshot = grabber.capture_screenshot()
+                if screenshot is not None:
+                    # Save screenshot
+                    os.makedirs("test_output", exist_ok=True)
+                    cv2.imwrite("test_output/test_screenshot.png", screenshot)
+                    print("Screenshot saved to test_output/test_screenshot.png")
+                    
+                    # Display screenshot
+                    cv2.imshow("Screenshot", screenshot)
+                    cv2.waitKey(0)
+                    cv2.destroyAllWindows()
+                else:
+                    print("Failed to capture screenshot")
+            else:
+                print("Invalid window selection")
+        except ValueError:
+            print("Invalid input. Using mock screenshot instead.")
+            screenshot = grabber.create_mock_screenshot()
+            
+            # Save screenshot
+            os.makedirs("test_output", exist_ok=True)
+            cv2.imwrite("test_output/mock_screenshot.png", screenshot)
+            print("Mock screenshot saved to test_output/mock_screenshot.png")
+            
+            # Display screenshot
+            cv2.imshow("Mock Screenshot", screenshot)
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+    else:
+        print("No windows available. Using mock screenshot.")
+        screenshot = grabber.create_mock_screenshot()
+        
         # Save screenshot
         os.makedirs("test_output", exist_ok=True)
-        cv2.imwrite("test_output/test_screenshot.png", screenshot)
-        print("Screenshot saved to test_output/test_screenshot.png")
+        cv2.imwrite("test_output/mock_screenshot.png", screenshot)
+        print("Mock screenshot saved to test_output/mock_screenshot.png")
         
-        # Process screenshot
-        game_state = grabber.process_screenshot(screenshot)
-        print("Game state:", game_state.to_dict())
+        # Display screenshot
+        cv2.imshow("Mock Screenshot", screenshot)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    test_screen_grabber()
