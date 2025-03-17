@@ -8,20 +8,24 @@ import queue
 import logging
 import json
 import datetime
-import copy
-import re
 from pathlib import Path
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("PokerScreenGrabber")
+# Set up logging with a more detailed format
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("PokerCV")
 
 # Import platform-specific window handling libraries
 try:
     import win32gui
     WINDOWS_PLATFORM = True
     
-    # Test if PrintWindow is available (some versions don't have it)
+    # Test if PrintWindow is available
     try:
         win32gui.PrintWindow
         PRINTWINDOW_AVAILABLE = True
@@ -45,6 +49,8 @@ except ImportError:
     logger.info("macOS-specific libraries not available")
 
 class WindowInfo:
+    """Information about a window for capturing"""
+    
     def __init__(self, title="", handle=None, rect=None):
         self.title = title
         self.handle = handle
@@ -52,14 +58,28 @@ class WindowInfo:
     
     def __str__(self):
         return f"{self.title} ({self.handle})"
+    
+    @property
+    def width(self):
+        """Get window width"""
+        if self.rect:
+            return self.rect[2] - self.rect[0]
+        return 0
+    
+    @property
+    def height(self):
+        """Get window height"""
+        if self.rect:
+            return self.rect[3] - self.rect[1]
+        return 0
 
 class PokerTableDetector:
-    """Detect poker table and player positions in screenshots"""
+    """Detect poker table and player positions in screenshots with improved accuracy"""
     
     def __init__(self):
         self.logger = logging.getLogger("PokerTableDetector")
         
-        # Color ranges for detecting green poker table
+        # Color ranges for detecting green poker table (HSV format)
         self.table_color_ranges = [
             # Light green
             [(35, 30, 40), (90, 255, 255)],
@@ -70,38 +90,50 @@ class PokerTableDetector:
         # Color ranges for detecting card positions (white areas)
         self.card_color_range = [(0, 0, 180), (180, 30, 255)]  # White in HSV
         
-        # Cached results to avoid redundant processing
-        self.cached_screenshot_hash = None
-        self.cached_table_contour = None
-        self.cached_player_positions = None
+        # Results caching to improve performance
+        self._cache = {
+            "last_img_hash": None,
+            "table_contour": None,
+            "table_rect": None,
+            "table_center": None,
+            "player_positions": None
+        }
+    
+    def _compute_image_hash(self, img):
+        """Compute a simple hash of the image for caching purposes"""
+        if img is None:
+            return None
+        # Use the average of downsampled image as a simple hash
+        small_img = cv2.resize(img, (32, 32))
+        return hash(small_img.mean())
     
     def detect_table(self, img):
         """
-        Detect poker table in the image
+        Detect poker table in the image with caching for improved performance
         
         Args:
             img: Source image
             
         Returns:
             Tuple: (table_contour, table_rect, center_point)
-                where table_contour is the largest detected green contour,
-                table_rect is (x, y, w, h) of bounding box,
-                center_point is (cx, cy) of the table center
         """
+        # Check cache first
+        img_hash = self._compute_image_hash(img)
+        if img_hash and img_hash == self._cache["last_img_hash"] and self._cache["table_contour"] is not None:
+            return self._cache["table_contour"], self._cache["table_rect"], self._cache["table_center"]
+        
         try:
             # Convert to HSV for better color detection
             hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
             
-            # Create masks for each green color range
-            masks = []
+            # Create masks for each green color range and combine them
+            combined_mask = None
             for lower, upper in self.table_color_ranges:
                 mask = cv2.inRange(hsv, np.array(lower), np.array(upper))
-                masks.append(mask)
-            
-            # Combine masks
-            combined_mask = masks[0]
-            for mask in masks[1:]:
-                combined_mask = cv2.bitwise_or(combined_mask, mask)
+                if combined_mask is None:
+                    combined_mask = mask
+                else:
+                    combined_mask = cv2.bitwise_or(combined_mask, mask)
             
             # Apply morphological operations to clean up the mask
             kernel = np.ones((5, 5), np.uint8)
@@ -114,11 +146,12 @@ class PokerTableDetector:
                 self.logger.warning("No table contours found")
                 return None, None, None
             
-            # Find the largest contour by area
+            # Find the largest contour by area (likely to be the poker table)
             table_contour = max(contours, key=cv2.contourArea)
             
             # Get the bounding rectangle
             x, y, w, h = cv2.boundingRect(table_contour)
+            table_rect = (x, y, w, h)
             
             # Calculate the center of the table
             moments = cv2.moments(table_contour)
@@ -130,15 +163,23 @@ class PokerTableDetector:
                 cx = int(moments["m10"] / moments["m00"])
                 cy = int(moments["m01"] / moments["m00"])
             
-            return table_contour, (x, y, w, h), (cx, cy)
+            table_center = (cx, cy)
+            
+            # Update cache
+            self._cache["last_img_hash"] = img_hash
+            self._cache["table_contour"] = table_contour
+            self._cache["table_rect"] = table_rect
+            self._cache["table_center"] = table_center
+            
+            return table_contour, table_rect, table_center
         
         except Exception as e:
-            self.logger.error(f"Error detecting table: {str(e)}")
+            self.logger.error(f"Error detecting table: {str(e)}", exc_info=True)
             return None, None, None
     
     def detect_player_positions(self, img, table_center=None):
         """
-        Detect player positions around the poker table
+        Detect player positions around the poker table with caching for improved performance
         
         Args:
             img: Source image
@@ -147,6 +188,12 @@ class PokerTableDetector:
         Returns:
             List of player position points [(x1, y1), (x2, y2), ...]
         """
+        # Check cache first
+        img_hash = self._compute_image_hash(img)
+        if (img_hash and img_hash == self._cache["last_img_hash"] and 
+            self._cache["player_positions"] is not None):
+            return self._cache["player_positions"]
+        
         try:
             if table_center is None:
                 # Try to detect the table first
@@ -185,11 +232,16 @@ class PokerTableDetector:
             
             # Try to refine positions by looking for actual player cards
             refined_positions = self._refine_positions_with_cards(img, player_positions)
+            result = refined_positions if refined_positions else player_positions
             
-            return refined_positions if refined_positions else player_positions
+            # Update cache
+            self._cache["last_img_hash"] = img_hash
+            self._cache["player_positions"] = result
+            
+            return result
         
         except Exception as e:
-            self.logger.error(f"Error detecting player positions: {str(e)}")
+            self.logger.error(f"Error detecting player positions: {str(e)}", exc_info=True)
             return []
     
     def _refine_positions_with_cards(self, img, initial_positions, search_radius=50):
@@ -217,13 +269,13 @@ class PokerTableDetector:
             card_mask = cv2.morphologyEx(card_mask, cv2.MORPH_CLOSE, kernel)
             
             # Find card contours
-            card_contours, _ = cv2.findContours(card_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            contours, _ = cv2.findContours(card_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
-            if not card_contours:
+            if not contours:
                 return initial_positions
             
             # Filter contours to find card-like shapes
-            card_contours = [c for c in card_contours if self._is_card_like(c)]
+            card_contours = [c for c in contours if self._is_card_like(c)]
             
             if not card_contours:
                 return initial_positions
@@ -281,7 +333,7 @@ class PokerTableDetector:
         return True
 
 class AutoROICalibrator:
-    """Automatically calibrate regions of interest for poker screenshots"""
+    """Automatically calibrate regions of interest for poker screenshots with improved accuracy"""
     
     def __init__(self):
         self.logger = logging.getLogger("AutoROICalibrator")
@@ -303,16 +355,30 @@ class AutoROICalibrator:
         self.pot_region_width = 100
         self.pot_region_height = 20
     
-    def calibrate_roi(self, img):
+    def calibrate_roi(self, img, force_recalibrate=False):
         """
         Automatically calibrate regions of interest for a poker screenshot
         
         Args:
             img: Source image
+            force_recalibrate: Force recalibration even if ROI exists
             
         Returns:
             dict: Calibrated ROI configuration
         """
+        # Try loading existing ROI first, unless force_recalibrate is True
+        roi_file = "roi_config.json"
+        if os.path.exists(roi_file) and not force_recalibrate:
+            try:
+                with open(roi_file, 'r') as f:
+                    loaded_roi = json.load(f)
+                
+                self.logger.info(f"Loaded existing ROI configuration from {roi_file}")
+                return self._convert_string_keys_to_int(loaded_roi)
+            except Exception as e:
+                self.logger.warning(f"Failed to load existing ROI: {str(e)}")
+                # Continue with calibration
+        
         try:
             # Detect the poker table
             table_contour, table_rect, table_center = self.table_detector.detect_table(img)
@@ -436,26 +502,18 @@ class AutoROICalibrator:
                 'fold': [(main_x, main_y + card_height + chip_height + action_spacing * 3, action_width, action_height)]
             }
             
+            # Save calibrated ROI for future use
+            self.save_roi_to_file(roi, roi_file)
+            
             return roi
         
         except Exception as e:
-            self.logger.error(f"Error calibrating ROI: {str(e)}")
+            self.logger.error(f"Error calibrating ROI: {str(e)}", exc_info=True)
             return self._get_default_roi()
     
-    def calibrate_and_save(self, img, output_file="roi_config.json"):
-        """
-        Calibrate and save ROI configuration to a file
-        
-        Args:
-            img: Source image
-            output_file: Path to save the configuration
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
+    def save_roi_to_file(self, roi, output_file="roi_config.json"):
+        """Save ROI configuration to a file"""
         try:
-            roi = self.calibrate_roi(img)
-            
             # Convert tuple keys to strings for JSON serialization
             json_roi = self._convert_to_json_serializable(roi)
             
@@ -464,7 +522,6 @@ class AutoROICalibrator:
             
             self.logger.info(f"ROI configuration saved to {output_file}")
             return True
-        
         except Exception as e:
             self.logger.error(f"Error saving ROI configuration: {str(e)}")
             return False
@@ -485,114 +542,12 @@ class AutoROICalibrator:
         
         return result
     
-    def load_and_apply_roi(self, img, roi_file="roi_config.json"):
-        """
-        Load ROI from file and adjust to current image dimensions
-        
-        Args:
-            img: Source image
-            roi_file: Path to ROI configuration file
-            
-        Returns:
-            dict: Adjusted ROI configuration
-        """
-        try:
-            if os.path.exists(roi_file):
-                with open(roi_file, 'r') as f:
-                    roi = json.load(f)
-                
-                # Detect the poker table
-                table_contour, table_rect, table_center = self.table_detector.detect_table(img)
-                
-                if table_center is None:
-                    self.logger.warning("Could not detect poker table, using loaded ROI without adjustment")
-                    return roi
-                
-                # Get image dimensions
-                h, w = img.shape[:2]
-                
-                # Get table dimensions
-                table_x, table_y, table_width, table_height = table_rect
-                
-                # Adjust the loaded ROI to the current table dimensions
-                adjusted_roi = self._adjust_roi_to_current_table(roi, table_center, table_width, table_height, w, h)
-                
-                return adjusted_roi
-            else:
-                self.logger.warning(f"ROI file {roi_file} not found, calibrating new ROI")
-                return self.calibrate_roi(img)
-        
-        except Exception as e:
-            self.logger.error(f"Error loading and applying ROI: {str(e)}")
-            return self._get_default_roi()
-    
-    def _adjust_roi_to_current_table(self, roi, table_center, table_width, table_height, image_width, image_height):
-        """Adjust loaded ROI to current table dimensions"""
-        # Get table center
-        cx, cy = table_center
-        
-        # Create a copy of the ROI
-        adjusted_roi = {}
-        
-        # Default reference dimensions
-        ref_width = 800
-        ref_height = 600
-        
-        # Calculate scale factors
-        scale_x = table_width / ref_width
-        scale_y = table_height / ref_height
-        
-        # Adjust each region type
-        for region_type, regions in roi.items():
-            if isinstance(regions, list):
-                # Simple list of regions (like community_cards)
-                adjusted_roi[region_type] = []
-                
-                for region in regions:
-                    x, y, w, h = region
-                    
-                    # Adjust coordinates relative to table center
-                    adj_x = int(cx + (x - ref_width/2) * scale_x)
-                    adj_y = int(cy + (y - ref_height/2) * scale_y)
-                    adj_w = int(w * scale_x)
-                    adj_h = int(h * scale_y)
-                    
-                    # Ensure within image bounds
-                    adj_x = max(0, min(image_width-1, adj_x))
-                    adj_y = max(0, min(image_height-1, adj_y))
-                    adj_w = min(adj_w, image_width - adj_x)
-                    adj_h = min(adj_h, image_height - adj_y)
-                    
-                    adjusted_roi[region_type].append((adj_x, adj_y, adj_w, adj_h))
-            
-            elif isinstance(regions, dict):
-                # Nested dict (like player_cards, player_chips)
-                adjusted_roi[region_type] = {}
-                
-                for player_id, player_regions in regions.items():
-                    # Convert string keys back to integers if needed
-                    player_id = int(player_id) if player_id.isdigit() else player_id
-                    
-                    adjusted_roi[region_type][player_id] = []
-                    
-                    for region in player_regions:
-                        x, y, w, h = region
-                        
-                        # Adjust coordinates relative to table center
-                        adj_x = int(cx + (x - ref_width/2) * scale_x)
-                        adj_y = int(cy + (y - ref_height/2) * scale_y)
-                        adj_w = int(w * scale_x)
-                        adj_h = int(h * scale_y)
-                        
-                        # Ensure within image bounds
-                        adj_x = max(0, min(image_width-1, adj_x))
-                        adj_y = max(0, min(image_height-1, adj_y))
-                        adj_w = min(adj_w, image_width - adj_x)
-                        adj_h = min(adj_h, image_height - adj_y)
-                        
-                        adjusted_roi[region_type][player_id].append((adj_x, adj_y, adj_w, adj_h))
-        
-        return adjusted_roi
+    def _convert_string_keys_to_int(self, roi):
+        """Convert string keys back to integers in the loaded ROI"""
+        for key in ['player_cards', 'player_chips', 'current_bets']:
+            if key in roi:
+                roi[key] = {int(k) if k.isdigit() else k: v for k, v in roi[key].items()}
+        return roi
     
     def _get_default_roi(self):
         """Get default ROI configuration"""
@@ -658,6 +613,8 @@ class AutoROICalibrator:
         }
 
 class PokerScreenGrabber:
+    """Enhanced screen grabber for poker gameplay with optimized performance"""
+    
     def __init__(self, capture_interval=2.0, output_dir="poker_data"):
         # Settings
         self.capture_interval = capture_interval
@@ -667,6 +624,7 @@ class PokerScreenGrabber:
         self.selected_window = None
         self.window_handle = None
         self.window_rect = None
+        self.logger = logging.getLogger("PokerScreenGrabber")
         
         # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
@@ -675,7 +633,7 @@ class PokerScreenGrabber:
         self.roi_calibrator = AutoROICalibrator()
         
         # Initialize with default ROI
-        self.roi = self._get_default_roi()
+        self.roi = self.roi_calibrator._get_default_roi()
         
         # Show debugging overlay by default
         self.show_debug_overlay = True
@@ -688,48 +646,65 @@ class PokerScreenGrabber:
         # Current game state and debug info
         self.current_state = None
         self.last_detection_info = {}
+        
+        # Screenshot cache to avoid redundant processing
+        self._screenshot_cache = {
+            "last_time": 0,
+            "screenshot": None,
+            "path": None
+        }
     
     def get_window_list(self):
-        """Get a list of all visible windows"""
+        """Get a list of all visible windows with improved error handling"""
         windows = []
         
         if WINDOWS_PLATFORM:
-            def enum_windows_callback(hwnd, results):
-                if win32gui.IsWindowVisible(hwnd):
-                    window_title = win32gui.GetWindowText(hwnd)
-                    if window_title and window_title != "Program Manager":
-                        rect = win32gui.GetWindowRect(hwnd)
-                        windows.append(WindowInfo(window_title, hwnd, rect))
-                return True
-            
-            win32gui.EnumWindows(enum_windows_callback, [])
+            try:
+                def enum_windows_callback(hwnd, results):
+                    if win32gui.IsWindowVisible(hwnd):
+                        try:
+                            window_title = win32gui.GetWindowText(hwnd)
+                            if window_title and window_title != "Program Manager":
+                                rect = win32gui.GetWindowRect(hwnd)
+                                windows.append(WindowInfo(window_title, hwnd, rect))
+                        except Exception as e:
+                            self.logger.debug(f"Error getting window info: {str(e)}")
+                    return True
+                
+                win32gui.EnumWindows(enum_windows_callback, [])
+            except Exception as e:
+                self.logger.error(f"Error enumerating windows: {str(e)}")
         
         elif MAC_PLATFORM:
-            window_list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID)
-            for window in window_list:
-                window_title = window.get('kCGWindowOwnerName', '')
-                if window_title:
-                    bounds = window.get('kCGWindowBounds', {})
-                    if bounds:
-                        rect = (
-                            bounds['X'], 
-                            bounds['Y'], 
-                            bounds['X'] + bounds['Width'], 
-                            bounds['Y'] + bounds['Height']
-                        )
-                        windows.append(WindowInfo(window_title, window.get('kCGWindowNumber'), rect))
+            try:
+                window_list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID)
+                for window in window_list:
+                    window_title = window.get('kCGWindowOwnerName', '')
+                    if window_title:
+                        bounds = window.get('kCGWindowBounds', {})
+                        if bounds:
+                            rect = (
+                                bounds['X'], 
+                                bounds['Y'], 
+                                bounds['X'] + bounds['Width'], 
+                                bounds['Y'] + bounds['Height']
+                            )
+                            windows.append(WindowInfo(window_title, window.get('kCGWindowNumber'), rect))
+            except Exception as e:
+                self.logger.error(f"Error getting macOS windows: {str(e)}")
         
         else:
-            # Fallback - just use window titles without handles
+            # Fallback - just use mock windows for non-Windows/macOS platforms
+            self.logger.info("Using mock windows list for unsupported platform")
             windows.append(WindowInfo("PokerTH", None, (0, 0, 1024, 768)))
             windows.append(WindowInfo("Other Window"))
         
+        self.logger.info(f"Found {len(windows)} windows")
         return windows
-
 
     def select_window(self, window_info):
         """
-        Select a window to capture
+        Select a window to capture with improved error handling
         
         Args:
             window_info: WindowInfo object or window title
@@ -738,7 +713,7 @@ class PokerScreenGrabber:
             bool: True if the window was found and selected, False otherwise
         """
         try:
-            logger.info(f"Selecting window: {window_info}")
+            self.logger.info(f"Selecting window: {window_info}")
             
             if isinstance(window_info, str):
                 # Find window by title
@@ -747,37 +722,25 @@ class PokerScreenGrabber:
                         self.selected_window = window.title
                         self.window_handle = window.handle
                         self.window_rect = window.rect
-                        logger.info(f"Selected window by title: {window.title}")
-                        
-                        # DO NOT automatically calibrate ROI - this is the critical change
-                        # We want to preserve existing ROI configuration
-                        
+                        self.logger.info(f"Selected window by title: {window.title}")
                         return True
                 
-                logger.warning(f"Window not found by title: {window_info}")
+                self.logger.warning(f"Window not found by title: {window_info}")
                 return False
             else:
                 # WindowInfo object provided
                 self.selected_window = window_info.title
                 self.window_handle = window_info.handle
                 self.window_rect = window_info.rect
-                logger.info(f"Selected window by object: {window_info.title}")
-                
-                # DO NOT automatically calibrate ROI
-                # The previous code had:
-                # screenshot = self.capture_screenshot()
-                # if screenshot is not None:
-                #     self.calibrate_roi_from_screenshot(screenshot)
-                # We remove this to preserve existing ROI configuration
-                
+                self.logger.info(f"Selected window by object: {window_info.title}")
                 return True
         except Exception as e:
-            logger.error(f"Error selecting window: {str(e)}", exc_info=True)
+            self.logger.error(f"Error selecting window: {str(e)}", exc_info=True)
             return False
     
     def capture_window(self, hwnd=None, rect=None):
         """
-        Capture a specific window with improved accuracy
+        Capture a specific window with optimized implementation
         
         Args:
             hwnd: Window handle (Windows only)
@@ -787,128 +750,118 @@ class PokerScreenGrabber:
             numpy.ndarray: Screenshot of the window or None on failure
         """
         try:
-            logger.info(f"Capturing window with hwnd={hwnd}, rect={rect}")
-            
+            # Use the most efficient capture method available
             if WINDOWS_PLATFORM and hwnd:
                 try:
-                    # Get window dimensions - include border for more accurate capture
+                    # Get window dimensions
                     left, top, right, bottom = win32gui.GetWindowRect(hwnd)
                     width = right - left
                     height = bottom - top
                     
-                    logger.info(f"Window dimensions: {width}x{height} at ({left},{top})")
-                    
-                    # Use pyautogui for reliable capture
+                    # Capture screen region using pyautogui (more reliable than PrintWindow)
                     screenshot = pyautogui.screenshot(region=(left, top, width, height))
                     img = np.array(screenshot)
                     
-                    if img is not None and img.size > 0:
-                        # Convert from RGB to BGR for OpenCV
-                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                        logger.info(f"Successfully captured window: {img.shape}")
-                        return img
-                    else:
-                        logger.warning("Captured image is empty")
+                    # Convert from RGB to BGR for OpenCV
+                    return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
                 except Exception as e:
-                    logger.error(f"Error capturing window with handle: {str(e)}")
+                    self.logger.warning(f"Windows capture failed: {str(e)}, trying fallback")
             
-            # Fallback: Use direct region capture if rect is provided
+            # Fallback: Use direct region capture
             if rect:
                 try:
                     left, top, right, bottom = rect
                     width = right - left
                     height = bottom - top
                     
-                    logger.info(f"Capturing region: {width}x{height} at ({left},{top})")
-                    
-                    # Use pyautogui for reliable capture
                     screenshot = pyautogui.screenshot(region=(left, top, width, height))
                     img = np.array(screenshot)
                     
-                    if img is not None and img.size > 0:
-                        # Convert from RGB to BGR for OpenCV
-                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                        logger.info(f"Successfully captured region: {img.shape}")
-                        return img
-                    else:
-                        logger.warning("Captured region image is empty")
+                    # Convert from RGB to BGR for OpenCV
+                    return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
                 except Exception as e:
-                    logger.error(f"Error capturing region: {str(e)}")
+                    self.logger.warning(f"Region capture failed: {str(e)}, trying fallback")
             
-            # If all capture methods fail, use mock screenshot as last resort
-            logger.warning("All capture methods failed, using mock screenshot")
+            # Final fallback: Use mock screenshot
+            self.logger.warning("All capture methods failed, using mock screenshot")
             return self.create_mock_screenshot()
             
         except Exception as e:
-            logger.error(f"Capture window exception: {str(e)}", exc_info=True)
-            logger.info("Falling back to mock screenshot due to error")
+            self.logger.error(f"Error capturing window: {str(e)}", exc_info=True)
             return self.create_mock_screenshot()
     
-    def capture_screenshot(self):
+    def capture_screenshot(self, use_cache=True, max_cache_age=1.0):
         """
-        Capture a screenshot of the selected window.
+        Capture a screenshot of the selected window with caching for improved performance
         
+        Args:
+            use_cache: Whether to use the cached screenshot if available
+            max_cache_age: Maximum age of the cached screenshot in seconds
+            
         Returns:
-            numpy.ndarray: Screenshot image or None if no window is selected
+            numpy.ndarray: Screenshot image
         """
         try:
-            logger.info("Starting screenshot capture")
+            current_time = time.time()
+            
+            # Check if we can use the cached screenshot
+            if (use_cache and 
+                self._screenshot_cache["screenshot"] is not None and 
+                current_time - self._screenshot_cache["last_time"] < max_cache_age):
+                self.logger.debug("Using cached screenshot")
+                return self._screenshot_cache["screenshot"]
+            
+            self.logger.info("Capturing new screenshot")
             
             # Check if we have window information
             if self.selected_window:
-                logger.info(f"Capturing selected window: {self.selected_window}")
+                img = None
                 
-                # Try platform-specific window capture if available
+                # Try platform-specific window capture first
                 if WINDOWS_PLATFORM and self.window_handle:
-                    logger.info(f"Using Windows-specific capture for handle: {self.window_handle}")
                     img = self.capture_window(hwnd=self.window_handle)
-                    if img is not None:
-                        # Add debugging overlay
-                        if self.show_debug_overlay:
-                            img = self.add_debugging_overlay(img)
-                        return img
-                    logger.warning("Windows-specific capture failed, falling back to region capture")
                 
-                if self.window_rect:
-                    logger.info(f"Using region capture for rect: {self.window_rect}")
+                # Fall back to region capture if needed
+                if img is None and self.window_rect:
                     img = self.capture_window(rect=self.window_rect)
-                    if img is not None:
-                        # Add debugging overlay
-                        if self.show_debug_overlay:
-                            img = self.add_debugging_overlay(img)
-                        return img
-                    logger.warning("Region capture failed, falling back to mock screenshot")
                 
-                # If platform-specific capturing failed or isn't available, use mock screenshot
-                logger.info("Using mock screenshot as fallback")
-                img = self.create_mock_screenshot()
-                # Add debugging overlay
+                # Fall back to mock screenshot as a last resort
+                if img is None:
+                    img = self.create_mock_screenshot()
+                
+                # Add debugging overlay if enabled
                 if self.show_debug_overlay:
                     img = self.add_debugging_overlay(img)
+                
+                # Update cache
+                self._screenshot_cache["screenshot"] = img
+                self._screenshot_cache["last_time"] = current_time
+                
                 return img
             else:
-                logger.warning("No window selected for capture - using mock screenshot")
+                self.logger.warning("No window selected for capture - using mock screenshot")
                 img = self.create_mock_screenshot()
-                # Add debugging overlay
+                
                 if self.show_debug_overlay:
                     img = self.add_debugging_overlay(img)
+                
                 return img
         
         except Exception as e:
-            logger.error(f"Error in capture_screenshot: {str(e)}", exc_info=True)
-            logger.info("Returning mock screenshot due to error")
+            self.logger.error(f"Error capturing screenshot: {str(e)}", exc_info=True)
             img = self.create_mock_screenshot()
-            # Add debugging overlay - try/except to ensure we return something even if overlay fails
+            
             try:
                 if self.show_debug_overlay:
                     img = self.add_debugging_overlay(img)
             except:
                 pass
+                
             return img
     
     def save_screenshot(self, img, filepath):
         """
-        Save a screenshot to a file
+        Save a screenshot to a file with error handling
         
         Args:
             img: Screenshot image as numpy array
@@ -917,86 +870,34 @@ class PokerScreenGrabber:
         try:
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
             cv2.imwrite(filepath, img)
-            logger.info(f"Screenshot saved to {filepath}")
-        except Exception as e:
-            logger.error(f"Error saving screenshot: {str(e)}")
-    
-    def calibrate_roi_from_screenshot(self, img=None, force_calibrate=False):
-        """
-        Calibrate ROI from current screenshot
-        
-        Args:
-            img: Screenshot to use for calibration, or None to capture new screenshot
-            force_calibrate: If True, calibrate even if ROI config exists
+            self.logger.info(f"Screenshot saved to {filepath}")
             
-        Returns:
-            bool: True if calibration was successful
-        """
-        try:
-            # Check if ROI configuration already exists
-            roi_file = "roi_config.json"
+            # Update cache path
+            self._screenshot_cache["path"] = filepath
             
-            if os.path.exists(roi_file) and not force_calibrate:
-                logger.info("ROI configuration file already exists. Skipping calibration.")
-                # Make sure existing configuration is loaded
-                if not self.load_regions_from_file(roi_file):
-                    logger.warning("Failed to load existing ROI configuration.")
-                return True
-            
-            # Proceed with calibration
-            if img is None:
-                img = self.capture_screenshot()
-            
-            if img is not None:
-                logger.info(f"Calibrating ROI for image size: {img.shape}")
-                
-                # Get image dimensions
-                h, w = img.shape[:2]
-                
-                # For debugging, save the image being used for calibration
-                debug_dir = "debug_calibration"
-                os.makedirs(debug_dir, exist_ok=True)
-                timestamp = int(time.time())
-                calibration_img_path = f"{debug_dir}/calibration_source_{timestamp}.png"
-                cv2.imwrite(calibration_img_path, img)
-                
-                self.roi = self.roi_calibrator.calibrate_roi(img)
-                
-                # Save the calibrated regions
-                self.save_regions_to_file(roi_file)
-                
-                # Log the calibrated ROI
-                logger.info(f"ROI calibrated successfully for {w}x{h} image")
-                
-                # For debugging, save an overlay of the calibrated regions
-                overlay_img = self.add_debugging_overlay(img)
-                overlay_path = f"{debug_dir}/calibration_overlay_{timestamp}.png"
-                cv2.imwrite(overlay_path, overlay_img)
-                
-                return True
-            else:
-                logger.warning("Failed to capture screenshot for ROI calibration")
-                return False
-        except Exception as e:
-            logger.error(f"Error calibrating ROI: {str(e)}", exc_info=True)
-            return False
-
-    def save_regions_to_file(self, filename="roi_config.json"):
-        """Save the current ROI configuration to a file"""
-        try:
-            # Convert ROI to a JSON-serializable format
-            json_roi = self.roi_calibrator._convert_to_json_serializable(self.roi)
-            
-            with open(filename, 'w') as f:
-                json.dump(json_roi, f, indent=2)
-            logger.info(f"ROI configuration saved to {filename}")
             return True
         except Exception as e:
-            logger.error(f"Failed to save ROI configuration: {str(e)}")
+            self.logger.error(f"Error saving screenshot: {str(e)}")
+            return False
+    
+    def calibrate_roi_from_screenshot(self, img=None, force_calibrate=False):
+        """Calibrate ROI from current screenshot with improved error handling"""
+        try:
+            if img is None:
+                img = self.capture_screenshot(use_cache=False)
+                
+            if img is not None:
+                self.roi = self.roi_calibrator.calibrate_roi(img, force_recalibrate=force_calibrate)
+                return True
+            else:
+                self.logger.warning("Failed to capture screenshot for ROI calibration")
+                return False
+        except Exception as e:
+            self.logger.error(f"Error calibrating ROI: {str(e)}", exc_info=True)
             return False
     
     def load_regions_from_file(self, filename="roi_config.json"):
-        """Load ROI configuration from a file"""
+        """Load ROI configuration from a file with improved error handling"""
         try:
             if os.path.exists(filename):
                 with open(filename, 'r') as f:
@@ -1008,92 +909,20 @@ class PokerScreenGrabber:
                         loaded_roi[key] = {int(k) if k.isdigit() else k: v for k, v in loaded_roi[key].items()}
                 
                 self.roi = loaded_roi
-                logger.info(f"ROI configuration loaded from {filename}")
+                self.logger.info(f"ROI configuration loaded from {filename}")
                 return True
             else:
-                logger.warning(f"ROI configuration file not found: {filename}")
-                # Return false but don't reset to defaults - caller should handle this
-                return False
+                self.logger.warning(f"ROI configuration file not found: {filename}")
         except Exception as e:
-            logger.error(f"Failed to load ROI configuration: {str(e)}")
-            # Return false but don't reset to defaults
-            return False
+            self.logger.error(f"Failed to load ROI configuration: {str(e)}")
+        
+        # If we get here, loading failed - use default ROI
+        self.roi = self.roi_calibrator._get_default_roi()
+        return False
     
-    def _detect_card(self, img, card_region):
-        """
-        Detect a card in the given region
-        
-        Args:
-            img: Source image
-            card_region: Region tuple (x, y, w, h)
-            
-        Returns:
-            tuple: (value, suit) or (None, None) if no card detected
-        """
-        # Simple card detection - for real implementation, use a more sophisticated method
-        # This is a placeholder for the improved card detection that would be implemented
-        try:
-            x, y, w, h = card_region
-            
-            # Ensure region is within image bounds
-            if x >= 0 and y >= 0 and x+w <= img.shape[1] and y+h <= img.shape[0]:
-                card_img = img[y:y+h, x:x+w]
-                
-                # Check if a card is present
-                if self._is_card_visible(card_img):
-                    from improved_poker_cv_analyzer import ImprovedCardDetector
-                    detector = ImprovedCardDetector()
-                    return detector.detect_card(card_img)
-            
-            return None, None
-        except Exception as e:
-            logger.error(f"Error detecting card: {str(e)}")
-            return None, None
-    
-    def _is_card_visible(self, card_img):
-        """Check if a card is visible (not folded or hidden)"""
-        if card_img is None or card_img.size == 0:
-            return False
-        
-        # Convert to grayscale
-        gray = cv2.cvtColor(card_img, cv2.COLOR_BGR2GRAY)
-        
-        # Threshold to find white areas (cards are mostly white)
-        _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-        
-        # Count white pixels
-        white_pixels = cv2.countNonZero(thresh)
-        total_pixels = card_img.shape[0] * card_img.shape[1]
-        
-        # If more than 40% of pixels are white, it's likely a card
-        return white_pixels > (total_pixels * 0.4)
-    
-    def _detect_chip_count(self, img, chip_region):
-        """
-        Detect chip count from the given region
-        
-        Args:
-            img: Source image
-            chip_region: Region tuple (x, y, w, h)
-            
-        Returns:
-            int: Detected chip count or 0
-        """
-        try:
-            x, y, w, h = chip_region
-            
-            # Ensure region is within image bounds
-            if x >= 0 and y >= 0 and x+w <= img.shape[1] and y+h <= img.shape[0]:
-                chip_img = img[y:y+h, x:x+w]
-                
-                from improved_poker_cv_analyzer import EnhancedTextRecognition
-                text_recognizer = EnhancedTextRecognition()
-                return text_recognizer.extract_chip_count(img, chip_region)
-            
-            return 0
-        except Exception as e:
-            logger.error(f"Error detecting chip count: {str(e)}")
-            return 0
+    def save_regions_to_file(self, filename="roi_config.json"):
+        """Save the current ROI configuration to a file"""
+        return self.roi_calibrator.save_roi_to_file(self.roi, filename)
     
     def add_debugging_overlay(self, img):
         """
@@ -1125,73 +954,28 @@ class PokerScreenGrabber:
                 'actions': (200, 200, 200)           # Gray
             }
             
-            # Draw community card regions
-            if 'community_cards' in self.roi:
-                for i, region in enumerate(self.roi['community_cards']):
-                    x, y, w, h = region
-                    cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['community_cards'], 2)
-                    cv2.putText(debug_img, f"CC {i+1}", (x, y-5), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['community_cards'], 1)
-            
-            # Draw player card regions
-            if 'player_cards' in self.roi:
-                for player_id, regions in self.roi['player_cards'].items():
+            # Draw regions on the image
+            for region_type, regions in self.roi.items():
+                color = colors.get(region_type, (255, 255, 255))
+                
+                if isinstance(regions, list):
+                    # Simple list of regions
                     for i, region in enumerate(regions):
                         x, y, w, h = region
-                        cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['player_cards'], 2)
-                        cv2.putText(debug_img, f"P{player_id} C{i+1}", (x, y-5), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['player_cards'], 1)
-            
-            # Draw player chip regions
-            if 'player_chips' in self.roi:
-                for player_id, regions in self.roi['player_chips'].items():
-                    for i, region in enumerate(regions):
-                        x, y, w, h = region
-                        cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['player_chips'], 2)
-                        cv2.putText(debug_img, f"P{player_id} $", (x, y-5), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['player_chips'], 1)
-            
-            # Draw main player chips region
-            if 'main_player_chips' in self.roi:
-                for i, region in enumerate(self.roi['main_player_chips']):
-                    x, y, w, h = region
-                    cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['main_player_chips'], 2)
-                    cv2.putText(debug_img, "Main $", (x, y-5), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['main_player_chips'], 1)
-            
-            # Draw current bets regions
-            if 'current_bets' in self.roi:
-                for player_id, regions in self.roi['current_bets'].items():
-                    for i, region in enumerate(regions):
-                        x, y, w, h = region
-                        cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['current_bets'], 2)
-                        cv2.putText(debug_img, f"P{player_id} Bet", (x, y-5), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['current_bets'], 1)
-            
-            # Draw game stage regions
-            if 'game_stage' in self.roi:
-                for i, region in enumerate(self.roi['game_stage']):
-                    x, y, w, h = region
-                    cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['game_stage'], 2)
-                    cv2.putText(debug_img, f"Stage {i+1}", (x, y-5), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['game_stage'], 1)
-            
-            # Draw pot region
-            if 'pot' in self.roi:
-                for i, region in enumerate(self.roi['pot']):
-                    x, y, w, h = region
-                    cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['pot'], 2)
-                    cv2.putText(debug_img, "Pot", (x, y-5), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['pot'], 1)
-            
-            # Draw action regions
-            if 'actions' in self.roi:
-                for action, regions in self.roi['actions'].items():
-                    for i, region in enumerate(regions):
-                        x, y, w, h = region
-                        cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['actions'], 2)
-                        cv2.putText(debug_img, action.capitalize(), (x, y-5), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['actions'], 1)
+                        if self._is_valid_region(region, debug_img.shape):
+                            cv2.rectangle(debug_img, (x, y), (x+w, y+h), color, 2)
+                            cv2.putText(debug_img, f"{region_type.replace('_', ' ')} {i}", (x, y-5), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                
+                elif isinstance(regions, dict):
+                    # Nested dict (player cards, chips, etc.)
+                    for key, key_regions in regions.items():
+                        for i, region in enumerate(key_regions):
+                            x, y, w, h = region
+                            if self._is_valid_region(region, debug_img.shape):
+                                cv2.rectangle(debug_img, (x, y), (x+w, y+h), color, 2)
+                                cv2.putText(debug_img, f"{region_type.replace('_', ' ')} {key}", (x, y-5), 
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             
             # Add legend
             legend_y = 20
@@ -1201,101 +985,32 @@ class PokerScreenGrabber:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
                     legend_y += 20
             
-            # Add detection info if available
-            if self.last_detection_info:
-                # Add header for detection info
-                cv2.putText(debug_img, "Detection Info:", (10, legend_y + 20), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                legend_y += 40
-                
-                # Display up to 3 detection results
-                count = 0
-                for key, value in self.last_detection_info.items():
-                    if count < 3:
-                        cv2.putText(debug_img, f"{key}: {value}", (10, legend_y), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                        legend_y += 20
-                        count += 1
+            # Add image dimensions and timestamp
+            h, w = debug_img.shape[:2]
+            time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cv2.putText(debug_img, f"Image: {w}x{h} - {time_str}", (10, h-10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
             return debug_img
         
         except Exception as e:
-            logger.error(f"Error adding debugging overlay: {str(e)}", exc_info=True)
-            return img  # Return original image if error occurs
+            self.logger.error(f"Error adding debugging overlay: {str(e)}", exc_info=True)
+            return img  # Return original image if overlay fails
     
-    def _get_default_roi(self):
-        """Return the default ROIs for PokerTH"""
-        return {
-            # Community cards area
-            'community_cards': [
-                (390, 220, 45, 65),  # First card
-                (450, 220, 45, 65),  # Second card
-                (510, 220, 45, 65),  # Third card
-                (570, 220, 45, 65),  # Fourth card
-                (630, 220, 45, 65)   # Fifth card
-            ],
-            
-            # Player cards area
-            'player_cards': {
-                1: [(510, 330, 45, 65), (560, 330, 45, 65)]  # Main player's cards (player at position 1)
-            },
-            
-            # Chip counts - positions align with the 9 seats at the table
-            'player_chips': {
-                1: [(280, 380, 80, 20)],   # Player 1 (bottom center)
-                2: [(90, 345, 80, 20)],    # Player 2 (bottom left)
-                3: [(80, 90, 80, 20)],     # Player 3 (middle left)
-                4: [(280, 40, 80, 20)],    # Player 4 (top left)
-                5: [(420, 40, 80, 20)],    # Player 5 (top center)
-                6: [(550, 40, 80, 20)],    # Player 6 (top right)
-                7: [(730, 90, 80, 20)],    # Player 7 (middle right)
-                8: [(730, 345, 80, 20)],   # Player 8 (bottom right)
-                9: [(550, 380, 80, 20)]    # Player 9 (bottom center right)
-            },
-            
-            # Main player chips (more precise location for the main player's chips)
-            'main_player_chips': [(280, 392, 100, 25)],  # Bottom center - main player chips
-            
-            # Current bets from each player
-            'current_bets': {
-                1: [(280, 350, 70, 20)],   # Player 1 (bottom center) current bet
-                2: [(120, 320, 70, 20)],   # Player 2 (bottom left) current bet
-                3: [(120, 120, 70, 20)],   # Player 3 (middle left) current bet
-                4: [(280, 70, 70, 20)],    # Player 4 (top left) current bet
-                5: [(400, 70, 70, 20)],    # Player 5 (top center) current bet
-                6: [(520, 70, 70, 20)],    # Player 6 (top right) current bet
-                7: [(680, 120, 70, 20)],   # Player 7 (middle right) current bet
-                8: [(680, 320, 70, 20)],   # Player 8 (bottom right) current bet
-                9: [(520, 350, 70, 20)]    # Player 9 (bottom center right) current bet
-            },
-            
-            # Game stage indicators
-            'game_stage': [
-                (265, 197, 80, 25),  # Game stage text (Preflop, Flop, Turn, River)
-                (720, 197, 80, 25)   # Alternative location for game stage
-            ],
-            
-            # Pot information
-            'pot': [(280, 248, 100, 20)],  # Pot size area
-            
-            # Action buttons
-            'actions': {
-                'raise': [(510, 480, 80, 20)],  # Raise button/amount
-                'call': [(510, 530, 80, 20)],   # Call button/amount
-                'fold': [(510, 580, 80, 20)]    # Fold button
-            }
-        }
+    def _is_valid_region(self, region, img_shape):
+        """Check if a region is valid within the image bounds"""
+        x, y, w, h = region
+        h_img, w_img = img_shape[:2]
+        return (x >= 0 and y >= 0 and x+w <= w_img and y+h <= h_img)
     
     def create_mock_screenshot(self):
         """
-        Create a mock screenshot based on the provided PokerTH screenshot
+        Create a mock screenshot for testing or when window capture fails
         
         Returns:
             numpy.ndarray: Mock screenshot
         """
         try:
-            logger.info("Creating mock screenshot")
-            
             # Create a green background similar to PokerTH
             img = np.ones((768, 1024, 3), dtype=np.uint8)
             img[:, :, 0] = 0    # B
@@ -1317,22 +1032,21 @@ class PokerScreenGrabber:
             }
             
             for i, pos in enumerate(card_positions):
-                if i < 5:  # All five cards
+                if i < 3:  # Just show 3 community cards (flop)
                     x, y = pos
                     # Draw card rectangle
                     cv2.rectangle(img, (x, y), (x + 45, y + 65), (255, 255, 255), -1)
                     
-                    # Add card value on top of the card
+                    # Add card value and suit
                     cv2.putText(img, card_values[i], 
-                            (x + 5, y + 20),  # Position at top of card
+                            (x + 5, y + 20),
                             cv2.FONT_HERSHEY_SIMPLEX, 
                             0.7, 
                             suit_colors[card_suits[i]], 
                             2)
                     
-                    # Add card suit on bottom part of the card
                     cv2.putText(img, card_suits[i], 
-                            (x + 5, y + 50),  # Position at bottom of card
+                            (x + 5, y + 50),
                             cv2.FONT_HERSHEY_SIMPLEX, 
                             1.2, 
                             suit_colors[card_suits[i]], 
@@ -1340,25 +1054,24 @@ class PokerScreenGrabber:
             
             # Add player cards (at the bottom)
             player_card_pos = [(510, 330), (560, 330)]
-            player_values = ['10', 'J']
-            player_suits = ['♣', '♦']
+            player_values = ['A', 'K']
+            player_suits = ['♥', '♥']
             
             for i, pos in enumerate(player_card_pos):
                 x, y = pos
                 # Draw card rectangle
                 cv2.rectangle(img, (x, y), (x + 45, y + 65), (255, 255, 255), -1)
                 
-                # Add card value on top of the card
+                # Add card value and suit
                 cv2.putText(img, player_values[i], 
-                        (x + 5, y + 20),  # Position at top of card
+                        (x + 5, y + 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 
                         0.7, 
                         suit_colors[player_suits[i]], 
                         2)
                 
-                # Add card suit on bottom part of the card
                 cv2.putText(img, player_suits[i], 
-                        (x + 5, y + 50),  # Position at bottom of card
+                        (x + 5, y + 50),
                         cv2.FONT_HERSHEY_SIMPLEX, 
                         1.2, 
                         suit_colors[player_suits[i]], 
@@ -1373,7 +1086,7 @@ class PokerScreenGrabber:
             # Add game stage
             cv2.putText(img, "FLOP", (265, 197), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
-            # Add "MOCK SCREENSHOT" text
+            # Add a watermark
             cv2.putText(
                 img, 
                 "MOCK SCREENSHOT - NO WINDOW SELECTED", 
@@ -1384,80 +1097,84 @@ class PokerScreenGrabber:
                 2
             )
             
-            logger.info(f"Mock screenshot created successfully, shape: {img.shape}")
+            # Add timestamp
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cv2.putText(
+                img,
+                timestamp,
+                (50, 60),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1
+            )
+            
             return img
             
         except Exception as e:
-            logger.error(f"Error creating mock screenshot: {str(e)}", exc_info=True)
-            # Return a very simple image as ultimate fallback
+            self.logger.error(f"Error creating mock screenshot: {str(e)}", exc_info=True)
+            # Return a very simple fallback image
             simple_img = np.ones((480, 640, 3), dtype=np.uint8) * 100
             cv2.putText(simple_img, "ERROR - FALLBACK IMAGE", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
             return simple_img
 
+
 # Test function
 def test_screen_grabber():
     """Test the screen grabber functionality"""
+    print("Testing PokerScreenGrabber...")
+    
+    # Create screen grabber
     grabber = PokerScreenGrabber(output_dir="poker_data/screenshots")
     
     # Get available windows
     windows = grabber.get_window_list()
-    print("Available windows:")
+    print(f"Found {len(windows)} windows:")
     for i, window in enumerate(windows):
         print(f"{i+1}. {window}")
     
-    # Select a window (if available)
+    # Select a window or use mock
     if windows:
         try:
-            print("\nSelect a window number:")
-            window_idx = int(input()) - 1
+            print("\nSelect a window number (or 0 for mock screenshot):")
+            window_idx = int(input())
             
-            if 0 <= window_idx < len(windows):
-                selected_window = windows[window_idx]
+            if window_idx == 0:
+                print("Using mock screenshot")
+                screenshot = grabber.create_mock_screenshot()
+            elif 0 < window_idx <= len(windows):
+                selected_window = windows[window_idx - 1]
                 print(f"Selected window: {selected_window}")
                 grabber.select_window(selected_window)
                 
-                # Capture a screenshot
+                # Capture screenshot
                 screenshot = grabber.capture_screenshot()
-                if screenshot is not None:
-                    # Save screenshot
-                    os.makedirs("test_output", exist_ok=True)
-                    cv2.imwrite("test_output/test_screenshot.png", screenshot)
-                    print("Screenshot saved to test_output/test_screenshot.png")
-                    
-                    # Display screenshot
-                    cv2.imshow("Screenshot", screenshot)
-                    cv2.waitKey(0)
-                    cv2.destroyAllWindows()
-                else:
-                    print("Failed to capture screenshot")
             else:
-                print("Invalid window selection")
+                print("Invalid selection, using mock screenshot")
+                screenshot = grabber.create_mock_screenshot()
         except ValueError:
-            print("Invalid input. Using mock screenshot instead.")
+            print("Invalid input, using mock screenshot")
             screenshot = grabber.create_mock_screenshot()
-            
-            # Save screenshot
-            os.makedirs("test_output", exist_ok=True)
-            cv2.imwrite("test_output/mock_screenshot.png", screenshot)
-            print("Mock screenshot saved to test_output/mock_screenshot.png")
-            
-            # Display screenshot
-            cv2.imshow("Mock Screenshot", screenshot)
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
     else:
-        print("No windows available. Using mock screenshot.")
+        print("No windows available, using mock screenshot")
         screenshot = grabber.create_mock_screenshot()
+    
+    # Save and display the screenshot
+    if screenshot is not None:
+        output_dir = "test_output"
+        os.makedirs(output_dir, exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = f"{output_dir}/test_screenshot_{timestamp}.png"
+        cv2.imwrite(output_path, screenshot)
+        print(f"Screenshot saved to {output_path}")
         
-        # Save screenshot
-        os.makedirs("test_output", exist_ok=True)
-        cv2.imwrite("test_output/mock_screenshot.png", screenshot)
-        print("Mock screenshot saved to test_output/mock_screenshot.png")
-        
-        # Display screenshot
-        cv2.imshow("Mock Screenshot", screenshot)
+        # Display the image using OpenCV
+        cv2.imshow("Screenshot", screenshot)
+        print("Press any key to close the image")
         cv2.waitKey(0)
         cv2.destroyAllWindows()
+    else:
+        print("Failed to capture screenshot")
 
 if __name__ == "__main__":
     test_screen_grabber()

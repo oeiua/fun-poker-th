@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Filename: main.py - Main entry point for the Poker Screen Grabber application
+# main.py - Unified entry point for the Poker Computer Vision project
 
 import os
 import sys
@@ -15,13 +15,14 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 import torch
+import time
 import glob
-import copy
+from pathlib import Path
 
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s',
     handlers=[
         logging.FileHandler("poker_app.log"),
         logging.StreamHandler(sys.stdout)
@@ -29,114 +30,159 @@ logging.basicConfig(
 )
 logger = logging.getLogger("PokerApp")
 
-# Import our modules
+# Try to import our modules and fail gracefully if there are problems
+IMPORT_ERROR = None
 try:
-    from poker_screen_grabber import PokerScreenGrabber, WindowInfo
-    from poker_cv_analyzer import PokerImageAnalyzer
-    from poker_neural_engine_torch import PokerNeuralNetwork, HandEvaluator
-    from poker_app_integration import PokerAssistant
-except ImportError:
-    # Add the current directory to the path
-    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-    from poker_screen_grabber import PokerScreenGrabber, WindowInfo
-    from poker_cv_analyzer import PokerImageAnalyzer
-    from poker_neural_engine_torch import PokerNeuralNetwork, HandEvaluator
-    from poker_app_integration import PokerAssistant
+    # Import optimized components
+    from screen_grabber import PokerScreenGrabber, WindowInfo
+    from poker_analyzer import OptimizedPokerAnalyzer
+    from neural_engine import OptimizedPokerNeuralNetwork
+    from poker_assistant import PokerAssistant
+except ImportError as e:
+    IMPORT_ERROR = str(e)
+    logger.error(f"Import error: {IMPORT_ERROR}")
+    # We'll handle this gracefully in the UI
 
-class PokerScreenGrabberApp:
-    """Main application GUI for Poker Screen Grabber with PyTorch backend"""
+class PokerApplication:
+    """Main application for Poker Computer Vision with improved UI and error handling"""
     
-    def __init__(self, root):
+    def __init__(self, root, config_file=None):
+        """Initialize the application with improved error recovery"""
         self.root = root
-        self.root.title("Poker Screen Grabber (PyTorch)")
-        self.root.geometry("1300x768+1080+800")
-        self.root.minsize(800, 600)
+        self.root.title("Poker CV Assistant")
+        self.root.geometry("1200x800")
+        self.root.minsize(900, 600)
         
-        # Initialize window selection attributes
+        # Check for import errors and warn the user if necessary
+        if IMPORT_ERROR:
+            messagebox.showerror(
+                "Import Error",
+                f"There was a problem importing required modules: {IMPORT_ERROR}\n\n"
+                "The application may not function correctly. "
+                "Please check your installation and dependencies."
+            )
+        
+        # Load config
+        self.config = self._load_config(config_file)
+        
+        # Set up UI variables
+        self.setup_ui_variables()
+        
+        # Window selection attributes
         self.window_list = []
         self.selected_window_info = None
         
-        # Create screen grabber for window detection
-        self.window_detector = PokerScreenGrabber(capture_interval=1.0, output_dir="poker_data/screenshots")
-        
-        # Load ROI configuration - modified to be more robust
-        roi_file = "roi_config.json"
-        if os.path.exists(roi_file):
-            try:
-                # Attempt to load from file
-                success = self.window_detector.load_regions_from_file(roi_file)
-                if not success:
-                    # Show error notification
-                    messagebox.showwarning(
-                        "ROI Configuration Warning", 
-                        f"Could not load ROI configuration from {roi_file}.\n\n"
-                        "Using default values. You can recalibrate once you select a window."
-                    )
-                    # Since loading failed, we'll explicitly use defaults
-                    self.window_detector.roi = self.window_detector._get_default_roi()
-            except Exception as e:
-                # Extra exception handling
-                logger.error(f"Error loading ROI configuration: {str(e)}", exc_info=True)
-                messagebox.showwarning(
-                    "ROI Configuration Error", 
-                    f"Error loading ROI configuration: {str(e)}.\n\n"
-                    "Using default values. You can recalibrate once you select a window."
-                )
-                # Use defaults
-                self.window_detector.roi = self.window_detector._get_default_roi()
-        else:
-            # File doesn't exist, use defaults - let the user know
-            logger.info("No ROI configuration file found. Using default values.")
-            self.window_detector.roi = self.window_detector._get_default_roi()
-        
         # Initialize components
-        self.poker_assistant = None
-        self.config = self._load_default_config()
-
-        # Status variables
-        self.status_var = tk.StringVar()
-        self.status_var.set("Ready - PyTorch Backend")
+        try:
+            # Screen grabber for window detection
+            self.window_detector = PokerScreenGrabber(
+                capture_interval=float(self.config.get('capture_interval', 2.0)),
+                output_dir=self.config.get('screenshot_dir', 'poker_data/screenshots')
+            )
+            
+            # Initialize Poker Assistant
+            self.poker_assistant = None  # Will be initialized when started
+        except Exception as e:
+            logger.error(f"Error initializing components: {str(e)}", exc_info=True)
+            messagebox.showerror(
+                "Initialization Error",
+                f"Failed to initialize application components: {str(e)}\n\n"
+                "The application may have limited functionality."
+            )
         
-        # Set up the UI
+        # Create UI
         self._create_menu()
         self._create_main_frame()
         
-        # Status bar
-        status_bar = ttk.Label(
-            self.root, 
-            textvariable=self.status_var, 
-            relief=tk.SUNKEN, 
-            anchor=tk.W
-        )
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
-        
-        # Update timer
-        self.update_id = None
-        self._schedule_ui_update()
+        # Initialize status display
+        self.status_update_id = None
+        self._schedule_status_update()
         
         # Populate window list
         self._refresh_windows()
         
-        logger.info("Application started with PyTorch backend")
+        logger.info("Application initialized")
     
-    def _load_default_config(self):
-        """Load default configuration"""
-        config = {
+    def setup_ui_variables(self):
+        """Set up UI variables with default values"""
+        self.status_var = tk.StringVar(value="Ready")
+        self.selected_window_var = tk.StringVar(value="None")
+        self.window_handle_var = tk.StringVar(value="None")
+        self.window_rect_var = tk.StringVar(value="None")
+        
+        self.action_var = tk.StringVar(value="N/A")
+        self.confidence_var = tk.StringVar(value="N/A")
+        self.bet_size_var = tk.StringVar(value="N/A")
+        self.hand_strength_var = tk.StringVar(value="N/A")
+        self.equity_var = tk.StringVar(value="N/A")
+        self.model_info_var = tk.StringVar(value="Default model")
+        
+        # Configuration variables
+        self.interval_var = tk.StringVar(value=str(self.config.get('capture_interval', 2.0)))
+        self.auto_play_var = tk.BooleanVar(value=self.config.get('auto_play', False))
+    
+    def _load_config(self, config_file=None):
+        """Load configuration with improved error handling and defaults"""
+        default_config = {
             'capture_interval': 2.0,
             'screenshot_dir': 'poker_data/screenshots',
             'game_state_dir': 'poker_data/game_states',
             'training_data_dir': 'poker_data/training',
             'model_path': None,
-            'model_save_path': 'poker_model.pt',  # Changed to .pt for PyTorch
+            'model_save_path': 'models/poker_model.pt',
             'auto_play': False,
-            'confidence_threshold': 0.7
+            'confidence_threshold': 0.7,
+            'auto_detect_poker': True,
+            'use_mock_data': True,
+            'show_debug_overlay': True,
+            'device': None,  # Auto-select device (CPU/GPU)
+            'ui_refresh_rate': 1.0  # UI update interval in seconds
         }
         
-        # Create directories if they don't exist
-        for dir_path in [config['screenshot_dir'], config['game_state_dir'], config['training_data_dir']]:
-            os.makedirs(dir_path, exist_ok=True)
+        # Create directories
+        for dir_path in [
+            default_config['screenshot_dir'], 
+            default_config['game_state_dir'], 
+            default_config['training_data_dir'],
+            os.path.dirname(default_config['model_save_path'])
+        ]:
+            try:
+                os.makedirs(dir_path, exist_ok=True)
+            except Exception as e:
+                logger.warning(f"Could not create directory {dir_path}: {str(e)}")
         
-        return config
+        # If config file is specified, try to load it
+        if config_file and os.path.exists(config_file):
+            try:
+                with open(config_file, 'r') as f:
+                    loaded_config = json.load(f)
+                    
+                # Update default config with loaded values
+                default_config.update(loaded_config)
+                logger.info(f"Loaded configuration from {config_file}")
+            except json.JSONDecodeError:
+                logger.error(f"Invalid JSON in config file: {config_file}")
+                messagebox.showwarning(
+                    "Configuration Error",
+                    f"The configuration file {config_file} contains invalid JSON. "
+                    "Using default configuration."
+                )
+            except Exception as e:
+                logger.error(f"Error loading configuration: {str(e)}")
+                messagebox.showwarning(
+                    "Configuration Error",
+                    f"Failed to load configuration from {config_file}: {str(e)}\n"
+                    "Using default configuration."
+                )
+        elif config_file:
+            logger.warning(f"Configuration file not found: {config_file}")
+            messagebox.showinfo(
+                "Configuration",
+                f"Configuration file {config_file} was not found. "
+                "Using default configuration."
+            )
+        
+        return default_config
     
     def _create_menu(self):
         """Create the application menu"""
@@ -144,8 +190,8 @@ class PokerScreenGrabberApp:
         
         # File menu
         file_menu = tk.Menu(menu_bar, tearoff=0)
-        file_menu.add_command(label="Load Configuration", command=self._load_config)
-        file_menu.add_command(label="Save Configuration", command=self._save_config)
+        file_menu.add_command(label="Load Configuration", command=self._load_config_file)
+        file_menu.add_command(label="Save Configuration", command=self._save_config_file)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_exit)
         menu_bar.add_cascade(label="File", menu=file_menu)
@@ -153,8 +199,29 @@ class PokerScreenGrabberApp:
         # Tools menu
         tools_menu = tk.Menu(menu_bar, tearoff=0)
         tools_menu.add_command(label="Settings", command=self._show_settings)
-        tools_menu.add_command(label="Train Neural Network", command=self._train_network)
+        tools_menu.add_command(label="Train Model", command=self._train_model)
+        tools_menu.add_command(label="Calibrate Regions", command=self._calibrate_regions)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="Analyze Single Screenshot", command=self._analyze_screenshot)
         menu_bar.add_cascade(label="Tools", menu=tools_menu)
+        
+        # View menu
+        view_menu = tk.Menu(menu_bar, tearoff=0)
+        
+        # Debug overlay toggle
+        self.show_overlay_var = tk.BooleanVar(value=self.config.get('show_debug_overlay', True))
+        view_menu.add_checkbutton(
+            label="Show Debug Overlay", 
+            variable=self.show_overlay_var,
+            command=self._toggle_debug_overlay
+        )
+        
+        # Device info
+        device_info = "Using GPU" if torch.cuda.is_available() else "Using CPU"
+        view_menu.add_separator()
+        view_menu.add_command(label=device_info, state=tk.DISABLED)
+        
+        menu_bar.add_cascade(label="View", menu=view_menu)
         
         # Help menu
         help_menu = tk.Menu(menu_bar, tearoff=0)
@@ -164,64 +231,8 @@ class PokerScreenGrabberApp:
         
         self.root.config(menu=menu_bar)
 
-    def _recalibrate_roi(self):
-        """Explicitly recalibrate ROI from the current window"""
-        if not self.selected_window_info:
-            messagebox.showwarning("Warning", "No window selected. Please select a window first.")
-            return
-        
-        # Confirm with user
-        result = messagebox.askyesno(
-            "Recalibrate ROI",
-            "This will recalibrate regions of interest based on the current window, " +
-            "overwriting any customizations. Continue?",
-            icon=messagebox.WARNING
-        )
-        
-        if not result:
-            return
-        
-        # Take a screenshot
-        screenshot = self.window_detector.capture_screenshot()
-        
-        if screenshot is not None:
-            # Log screenshot dimensions
-            logger.info(f"Screenshot dimensions for calibration: {screenshot.shape}")
-            
-            # Before calibration, save the current screenshot with overlay
-            debug_dir = "debug_calibration"
-            os.makedirs(debug_dir, exist_ok=True)
-            timestamp = int(time.time())
-            
-            # Save pre-calibration screenshot with current ROI overlay
-            pre_overlay = self.window_detector.add_debugging_overlay(screenshot)
-            pre_path = f"{debug_dir}/pre_calibration_{timestamp}.png"
-            cv2.imwrite(pre_path, pre_overlay)
-            
-            # Force recalibration with the current screenshot dimensions
-            success = self.window_detector.calibrate_roi_from_screenshot(screenshot, force_calibrate=True)
-            
-            if success:
-                # Save post-calibration screenshot with new ROI overlay
-                post_screenshot = self.window_detector.capture_screenshot()
-                post_overlay = self.window_detector.add_debugging_overlay(post_screenshot)
-                post_path = f"{debug_dir}/post_calibration_{timestamp}.png"
-                cv2.imwrite(post_path, post_overlay)
-                
-                messagebox.showinfo("Success", "ROI successfully recalibrated. Debug images saved to the 'debug_calibration' folder.")
-                
-                # Sync with poker assistant if it exists
-                if hasattr(self, 'poker_assistant') and self.poker_assistant:
-                    if hasattr(self.poker_assistant, 'screen_grabber') and hasattr(self.poker_assistant.screen_grabber, 'roi'):
-                        self.poker_assistant.screen_grabber.roi = copy.deepcopy(self.window_detector.roi)
-                        logger.info("ROI configuration synced with poker assistant")
-            else:
-                messagebox.showerror("Error", "Failed to recalibrate ROI.")
-        else:
-            messagebox.showerror("Error", "Failed to capture screenshot for calibration.")
-
     def _create_main_frame(self):
-        """Create the main application frame"""
+        """Create the main application layout with improved UI design"""
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
         
@@ -241,14 +252,13 @@ class PokerScreenGrabberApp:
         
         # Capture controls
         ttk.Label(control_frame, text="Capture Interval (s):").grid(row=1, column=0, sticky=tk.W, pady=5)
-        self.interval_var = tk.StringVar(value=str(self.config['capture_interval']))
         interval_entry = ttk.Entry(control_frame, width=10, textvariable=self.interval_var)
         interval_entry.grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
         
-        self.start_btn = ttk.Button(control_frame, text="Start Capture", command=self._start_assistant)
+        self.start_btn = ttk.Button(control_frame, text="Start Assistant", command=self._start_assistant)
         self.start_btn.grid(row=1, column=2, padx=5)
         
-        self.stop_btn = ttk.Button(control_frame, text="Stop Capture", command=self._stop_assistant, state=tk.DISABLED)
+        self.stop_btn = ttk.Button(control_frame, text="Stop Assistant", command=self._stop_assistant, state=tk.DISABLED)
         self.stop_btn.grid(row=1, column=3, padx=5)
         
         # Screenshot refresh button
@@ -256,7 +266,6 @@ class PokerScreenGrabberApp:
         self.refresh_screenshot_btn.grid(row=1, column=4, padx=5)
         
         # Auto-play checkbox
-        self.auto_play_var = tk.BooleanVar(value=self.config['auto_play'])
         auto_play_cb = ttk.Checkbutton(
             control_frame, 
             text="Enable Auto-Play",
@@ -265,25 +274,24 @@ class PokerScreenGrabberApp:
         )
         auto_play_cb.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=5)
         
-        # PyTorch information label
+        # Device info label
+        device_str = "Using GPU" if torch.cuda.is_available() else "Using CPU"
         ttk.Label(
             control_frame,
-            text="Using PyTorch Backend",
-            font=("TkDefaultFont", 10, "bold")
+            text=device_str,
+            font=("TkDefaultFont", 10, "italic")
         ).grid(row=2, column=2, columnspan=2, sticky=tk.E, pady=5)
         
-        # Create a frame for the region configuration buttons
-        roi_frame = ttk.Frame(control_frame)
-        roi_frame.grid(row=2, column=4, padx=5, pady=5)
+        # Status bar at the bottom
+        status_bar = ttk.Label(
+            self.root, 
+            textvariable=self.status_var, 
+            relief=tk.SUNKEN, 
+            anchor=tk.W
+        )
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
         
-        # Edit ROI configuration button
-        edit_roi_btn = ttk.Button(roi_frame, text="Edit Regions", command=self._show_region_settings)
-        edit_roi_btn.pack(side=tk.LEFT, padx=2)
-        
-        # Recalibrate ROI button (new button to explicitly control recalibration)
-        recalibrate_roi_btn = ttk.Button(roi_frame, text="Recalibrate", command=self._recalibrate_roi)
-        recalibrate_roi_btn.pack(side=tk.LEFT, padx=2)
-        # Content panes (using PanedWindow for resizable sections)
+        # Content panes - main area with preview and analysis
         content_paned = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
         content_paned.pack(fill=tk.BOTH, expand=True, pady=5)
         
@@ -294,7 +302,7 @@ class PokerScreenGrabberApp:
         self.preview_label = ttk.Label(preview_frame)
         self.preview_label.pack(fill=tk.BOTH, expand=True)
         
-        # Right pane - Analysis results
+        # Right pane - Analysis and information
         analysis_frame = ttk.LabelFrame(content_paned, text="Analysis", padding="10")
         content_paned.add(analysis_frame, weight=1)
         
@@ -320,35 +328,33 @@ class PokerScreenGrabberApp:
         
         # Decision display
         ttk.Label(decision_tab, text="Recommended Action:").pack(anchor=tk.W, pady=(10, 5))
-        self.action_var = tk.StringVar(value="N/A")
         ttk.Label(decision_tab, textvariable=self.action_var, font=("TkDefaultFont", 12, "bold")).pack(anchor=tk.W, padx=10)
         
         ttk.Label(decision_tab, text="Confidence:").pack(anchor=tk.W, pady=(10, 5))
-        self.confidence_var = tk.StringVar(value="N/A")
         ttk.Label(decision_tab, textvariable=self.confidence_var, font=("TkDefaultFont", 12, "bold")).pack(anchor=tk.W, padx=10)
         
         ttk.Label(decision_tab, text="Bet Size:").pack(anchor=tk.W, pady=(10, 5))
-        self.bet_size_var = tk.StringVar(value="N/A")
         ttk.Label(decision_tab, textvariable=self.bet_size_var, font=("TkDefaultFont", 12, "bold")).pack(anchor=tk.W, padx=10)
         
         # Hand strength section
         ttk.Separator(decision_tab, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
         ttk.Label(decision_tab, text="Hand Strength:").pack(anchor=tk.W, pady=(5, 5))
-        self.hand_strength_var = tk.StringVar(value="N/A")
         ttk.Label(decision_tab, textvariable=self.hand_strength_var, font=("TkDefaultFont", 12, "bold")).pack(anchor=tk.W, padx=10)
         
         ttk.Label(decision_tab, text="Equity:").pack(anchor=tk.W, pady=(10, 5))
-        self.equity_var = tk.StringVar(value="N/A")
         ttk.Label(decision_tab, textvariable=self.equity_var, font=("TkDefaultFont", 12, "bold")).pack(anchor=tk.W, padx=10)
         
-        # PyTorch model info
+        # Model information
         ttk.Separator(decision_tab, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
-        ttk.Label(decision_tab, text="PyTorch Model:").pack(anchor=tk.W, pady=(5, 5))
-        self.model_info_var = tk.StringVar(value="Default model")
+        ttk.Label(decision_tab, text="Model:").pack(anchor=tk.W, pady=(5, 5))
         ttk.Label(decision_tab, textvariable=self.model_info_var, font=("TkDefaultFont", 10)).pack(anchor=tk.W, padx=10)
         
-        # Add tabs to notebook
-        tab_control.pack(fill=tk.BOTH, expand=True)
+        # Performance stats
+        ttk.Label(decision_tab, text="Performance Stats:").pack(anchor=tk.W, pady=(10, 5))
+        self.stats_text = tk.Text(decision_tab, width=40, height=6, wrap=tk.WORD)
+        self.stats_text.pack(fill=tk.X, expand=False, padx=10)
+        self.stats_text.insert(tk.END, "No statistics available")
+        self.stats_text.config(state=tk.DISABLED)
         
         # Window info tab
         window_tab = ttk.Frame(tab_control)
@@ -356,24 +362,18 @@ class PokerScreenGrabberApp:
         
         # Window info display
         ttk.Label(window_tab, text="Selected Window:").pack(anchor=tk.W, pady=(10, 5))
-        self.selected_window_var = tk.StringVar(value="None")
         ttk.Label(window_tab, textvariable=self.selected_window_var, font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, padx=10)
         
         ttk.Label(window_tab, text="Window Handle:").pack(anchor=tk.W, pady=(10, 5))
-        self.window_handle_var = tk.StringVar(value="None")
         ttk.Label(window_tab, textvariable=self.window_handle_var).pack(anchor=tk.W, padx=10)
         
         ttk.Label(window_tab, text="Window Rect:").pack(anchor=tk.W, pady=(10, 5))
-        self.window_rect_var = tk.StringVar(value="None")
         ttk.Label(window_tab, textvariable=self.window_rect_var).pack(anchor=tk.W, padx=10)
         
         # Available Windows list
         ttk.Separator(window_tab, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
         ttk.Label(window_tab, text="Available Windows:").pack(anchor=tk.W, pady=(5, 5))
         
-        region_config_btn = ttk.Button(control_frame, text="Configure Regions", command=self._show_region_settings)
-        region_config_btn.grid(row=2, column=4, padx=5, pady=5)  # Adjust row/column as needed
-
         # Scrollable list of windows
         window_list_frame = ttk.Frame(window_tab)
         window_list_frame.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -387,36 +387,49 @@ class PokerScreenGrabberApp:
         
         # Bind select event
         self.window_list_box.bind('<<ListboxSelect>>', self._on_window_list_select)
+        
+        # Add tabs to notebook
+        tab_control.pack(fill=tk.BOTH, expand=True)
     
     def _refresh_windows(self):
-        """Refresh the list of available windows"""
-        # Get windows from the window detector
-        self.window_list = self.window_detector.get_window_list()
-        
-        # Update dropdown
-        window_titles = [w.title for w in self.window_list]
-        self.window_selector['values'] = window_titles
-        
-        if window_titles:
-            # Look for PokerTH windows
-            poker_indices = [i for i, title in enumerate(window_titles) if "poker" in title.lower()]
-            if poker_indices:
-                # Select the first PokerTH window found
-                self.window_selector.current(poker_indices[0])
+        """Refresh the list of available windows with error handling"""
+        try:
+            # Get windows from the window detector
+            if hasattr(self, 'window_detector'):
+                self.window_list = self.window_detector.get_window_list()
             else:
-                # Default to first window
-                self.window_selector.current(0)
-        
-        # Update window list box
-        self.window_list_box.delete(0, tk.END)
-        for i, window in enumerate(self.window_list):
-            self.window_list_box.insert(tk.END, f"{i+1}. {window.title}")
+                self.window_list = []
+                self.status_var.set("Window detector not initialized")
+                return
             
-            # Highlight poker windows
-            if "poker" in window.title.lower():
-                self.window_list_box.itemconfig(i, {'bg': '#e0f0e0'})  # Light green highlight
-        
-        self.status_var.set(f"Found {len(self.window_list)} windows - PyTorch backend active")
+            # Update dropdown
+            window_titles = [w.title for w in self.window_list]
+            self.window_selector['values'] = window_titles
+            
+            if window_titles:
+                # Look for poker windows
+                poker_indices = [i for i, title in enumerate(window_titles) if "poker" in title.lower()]
+                if poker_indices:
+                    # Select the first poker window found
+                    self.window_selector.current(poker_indices[0])
+                else:
+                    # Default to first window
+                    self.window_selector.current(0)
+            
+            # Update window list box
+            self.window_list_box.delete(0, tk.END)
+            for i, window in enumerate(self.window_list):
+                self.window_list_box.insert(tk.END, f"{i+1}. {window.title}")
+                
+                # Highlight poker windows
+                if "poker" in window.title.lower():
+                    self.window_list_box.itemconfig(i, {'bg': '#e0f0e0'})  # Light green highlight
+            
+            self.status_var.set(f"Found {len(self.window_list)} windows")
+        except Exception as e:
+            logger.error(f"Error refreshing windows: {str(e)}", exc_info=True)
+            self.status_var.set(f"Error refreshing windows: {str(e)}")
+            messagebox.showerror("Error", f"Failed to refresh window list: {str(e)}")
     
     def _on_window_list_select(self, event):
         """Handle window selection from the listbox"""
@@ -436,127 +449,121 @@ class PokerScreenGrabberApp:
             logger.error(f"Error in window list selection: {str(e)}")
     
     def _select_window(self):
-        """Select a window for capturing"""
-        selected_title = self.window_selector.get()
-        
-        if not selected_title:
-            self.status_var.set("No window selected")
-            return
-        
-        # Find the window info by title
-        matching_windows = [w for w in self.window_list if w.title == selected_title]
-        
-        if matching_windows:
-            # Select the first matching window
-            self.selected_window_info = matching_windows[0]
+        """Select a window for capturing with improved error handling"""
+        try:
+            selected_title = self.window_selector.get()
             
-            # Update UI
-            self.selected_window_var.set(self.selected_window_info.title)
-            self.window_handle_var.set(str(self.selected_window_info.handle))
+            if not selected_title:
+                self.status_var.set("No window selected")
+                return
             
-            if self.selected_window_info.rect:
-                rect_str = f"({self.selected_window_info.rect[0]}, {self.selected_window_info.rect[1]}, " \
-                        f"{self.selected_window_info.rect[2]}, {self.selected_window_info.rect[3]})"
-                self.window_rect_var.set(rect_str)
-            else:
-                self.window_rect_var.set("Unknown")
+            # Find the window info by title
+            matching_windows = [w for w in self.window_list if w.title == selected_title]
             
-            # Also update the window detector's selection
-            if self.window_detector:
-                success = self.window_detector.select_window(self.selected_window_info)
+            if matching_windows:
+                # Select the first matching window
+                self.selected_window_info = matching_windows[0]
                 
-                # Check if ROI config exists
-                roi_file = "roi_config.json"
-                if os.path.exists(roi_file):
-                    # Ask user if they want to auto-calibrate or keep existing configuration
-                    result = messagebox.askyesno(
-                        "ROI Configuration", 
-                        "An existing ROI configuration was found. Would you like to auto-calibrate ROI for the new window?\n\n"
-                        "Selecting 'No' will keep the existing ROI configuration.",
-                        icon=messagebox.QUESTION
-                    )
-                    
-                    if result:
-                        # User wants to calibrate
-                        self._preview_selected_window()
-                        calibrate_success = self.window_detector.calibrate_roi_from_screenshot()
-                        if calibrate_success:
-                            self.status_var.set(f"Selected window: {self.selected_window_info.title} (ROI calibrated)")
-                            # Save the new ROI
-                            self.window_detector.save_regions_to_file(roi_file)
-                            
-                            # Sync with poker assistant if it exists
-                            if hasattr(self, 'poker_assistant') and self.poker_assistant:
-                                if hasattr(self.poker_assistant, 'screen_grabber') and hasattr(self.poker_assistant.screen_grabber, 'roi'):
-                                    self.poker_assistant.screen_grabber.roi = copy.deepcopy(self.window_detector.roi)
-                        else:
-                            self.status_var.set(f"Selected window: {self.selected_window_info.title} (ROI calibration failed)")
-                    else:
-                        # User wants to keep existing ROI
-                        self.status_var.set(f"Selected window: {self.selected_window_info.title} (using existing ROI)")
-                        # Just to be safe, let's reload ROI from file
-                        self.window_detector.load_regions_from_file(roi_file)
+                # Update UI
+                self.selected_window_var.set(self.selected_window_info.title)
+                self.window_handle_var.set(str(self.selected_window_info.handle))
+                
+                if self.selected_window_info.rect:
+                    rect_str = f"({self.selected_window_info.rect[0]}, {self.selected_window_info.rect[1]}, " \
+                            f"{self.selected_window_info.rect[2]}, {self.selected_window_info.rect[3]})"
+                    self.window_rect_var.set(rect_str)
                 else:
-                    # No existing ROI, calibrate automatically
-                    self._preview_selected_window()
-                    self.window_detector.calibrate_roi_from_screenshot()
-                    self.window_detector.save_regions_to_file(roi_file)
-                    self.status_var.set(f"Selected window: {self.selected_window_info.title} (ROI calibrated)")
+                    self.window_rect_var.set("Unknown")
                 
-                if not success:
-                    self.status_var.set(f"Error selecting window: {self.selected_window_info.title}")
+                # Also update the window detector's selection
+                if hasattr(self, 'window_detector'):
+                    success = self.window_detector.select_window(self.selected_window_info)
+                    
+                    if success:
+                        self.status_var.set(f"Selected window: {self.selected_window_info.title}")
+                        
+                        # Preview the window
+                        self._preview_selected_window()
+                    else:
+                        self.status_var.set(f"Error selecting window: {self.selected_window_info.title}")
+                else:
+                    self.status_var.set(f"Window detector not initialized, can't select {self.selected_window_info.title}")
             else:
-                self.status_var.set(f"Selected window: {self.selected_window_info.title}")
-            
-            # Preview the window
-            self._preview_selected_window()
-        else:
-            self.status_var.set(f"Window not found: {selected_title}")
-
-
+                self.status_var.set(f"Window not found: {selected_title}")
+        except Exception as e:
+            logger.error(f"Error selecting window: {str(e)}", exc_info=True)
+            self.status_var.set(f"Error selecting window: {str(e)}")
+            messagebox.showerror("Error", f"Failed to select window: {str(e)}")
+    
     def _preview_selected_window(self):
-        """Preview the selected window"""
-        if not self.selected_window_info:
-            self.status_var.set("No window selected for preview")
-            return
-        
-        # Use the window detector to capture a screenshot
-        self.window_detector.select_window(self.selected_window_info)
-        img = self.window_detector.capture_screenshot()
-        
-        if img is not None:
-            # Update preview
-            self._update_preview(img)
-            self.status_var.set(f"Previewing window: {self.selected_window_info.title}")
-        else:
-            self.status_var.set("Failed to capture window preview")
+        """Preview the selected window with error handling"""
+        try:
+            if not self.selected_window_info:
+                self.status_var.set("No window selected for preview")
+                return
+            
+            # Use the window detector to capture a screenshot
+            if hasattr(self, 'window_detector'):
+                self.window_detector.select_window(self.selected_window_info)
+                img = self.window_detector.capture_screenshot()
+                
+                if img is not None:
+                    # Update preview
+                    self._update_preview(img)
+                    self.status_var.set(f"Previewing window: {self.selected_window_info.title}")
+                else:
+                    self.status_var.set("Failed to capture window preview")
+            else:
+                self.status_var.set("Window detector not initialized")
+        except Exception as e:
+            logger.error(f"Error previewing window: {str(e)}", exc_info=True)
+            self.status_var.set(f"Error previewing window: {str(e)}")
     
     def _update_preview(self, img):
         """Update the preview image"""
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = Image.fromarray(img)
-        
-        # Resize to fit the preview area while maintaining aspect ratio
-        preview_width = self.preview_label.winfo_width() or 640
-        preview_height = self.preview_label.winfo_height() or 480
-        
-        img.thumbnail((preview_width, preview_height), Image.LANCZOS)
-        
-        img = ImageTk.PhotoImage(image=img)
-        self.preview_label.configure(image=img)
-        self.preview_label.image = img  # Keep a reference
+        try:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(img)
+            
+            # Resize to fit the preview area while maintaining aspect ratio
+            preview_width = self.preview_label.winfo_width() or 640
+            preview_height = self.preview_label.winfo_height() or 480
+            
+            img.thumbnail((preview_width, preview_height), Image.LANCZOS)
+            
+            img = ImageTk.PhotoImage(image=img)
+            self.preview_label.configure(image=img)
+            self.preview_label.image = img  # Keep a reference
+        except Exception as e:
+            logger.error(f"Error updating preview: {str(e)}", exc_info=True)
+            self.status_var.set(f"Error updating preview: {str(e)}")
     
     def _update_latest_screenshot_display(self):
-        """Update the preview with the latest screenshot from the output directory"""
+        """Update the preview with the latest screenshot from the poker assistant"""
         try:
-            # Get the screenshot directory from config
+            # Check if poker assistant is running
+            if not hasattr(self, 'poker_assistant') or not self.poker_assistant:
+                self.status_var.set("Poker assistant not running")
+                return
+            
+            # Get latest state
+            latest_state = self.poker_assistant.get_latest_state()
+            
+            # Check if there's a latest screenshot
+            if latest_state['screenshot'] is not None:
+                # Update preview
+                self._update_preview(latest_state['screenshot'])
+                self.status_var.set("Displaying latest screenshot")
+                return
+            
+            # If no screenshot in state, try to find the latest from disk
             screenshot_dir = self.config.get('screenshot_dir', 'poker_data/screenshots')
             
             # Find the most recent screenshot
             list_of_files = glob.glob(os.path.join(screenshot_dir, 'screenshot_*.png'))
             if not list_of_files:
                 self.status_var.set("No screenshots found in directory")
-                return False
+                return
                 
             # Get the most recent file
             latest_screenshot = max(list_of_files, key=os.path.getctime)
@@ -570,325 +577,412 @@ class PokerScreenGrabberApp:
                 # Update status
                 filename = os.path.basename(latest_screenshot)
                 self.status_var.set(f"Displaying latest screenshot: {filename}")
-                return True
             else:
-                self.status_var.set(f"Failed to load latest screenshot: {latest_screenshot}")
-                return False
+                self.status_var.set(f"Failed to load latest screenshot")
         except Exception as e:
-            self.status_var.set(f"Error updating screenshot display: {str(e)}")
-            return False
-
-    def _sync_roi_with_components(self):
-        """Synchronize ROI configuration with all components that use it"""
-        try:
-            # Sync with poker assistant if it exists
-            if hasattr(self, 'poker_assistant') and self.poker_assistant:
-                if hasattr(self.poker_assistant, 'screen_grabber') and hasattr(self.poker_assistant.screen_grabber, 'roi'):
-                    # Make a deep copy to prevent shared references
-                    self.poker_assistant.screen_grabber.roi = copy.deepcopy(self.window_detector.roi)
-                    logger.info("ROI configuration synced with poker assistant")
-            
-            # You might have other components that need syncing here
-            
-            return True
-        except Exception as e:
-            logger.error(f"Error syncing ROI with components: {str(e)}", exc_info=True)
-            return False
-
+            logger.error(f"Error updating screenshot display: {str(e)}", exc_info=True)
+            self.status_var.set(f"Error updating screenshot: {str(e)}")
+    
     def _start_assistant(self):
-        """Start the poker assistant"""
+        """Start the poker assistant with improved error handling"""
         try:
+            # Check if assistant is already running
+            if hasattr(self, 'poker_assistant') and self.poker_assistant and hasattr(self.poker_assistant, 'running') and self.poker_assistant.running:
+                messagebox.showinfo("Info", "Poker Assistant is already running")
+                return
+            
             # Check if a window is selected
-            if not self.selected_window_info:
-                # Try to auto-select a poker window
-                poker_windows = [w for w in self.window_list if "poker" in w.title.lower()]
-                if poker_windows:
-                    self.selected_window_info = poker_windows[0]
-                    self.status_var.set(f"Auto-selected window: {self.selected_window_info.title}")
-                    
-                    # Update window info display
-                    self.selected_window_var.set(self.selected_window_info.title)
-                    self.window_handle_var.set(str(self.selected_window_info.handle))
-                    
-                    if self.selected_window_info.rect:
-                        rect_str = f"({self.selected_window_info.rect[0]}, {self.selected_window_info.rect[1]}, " \
-                                f"{self.selected_window_info.rect[2]}, {self.selected_window_info.rect[3]})"
-                        self.window_rect_var.set(rect_str)
-                else:
-                    # Show warning
-                    result = messagebox.askokcancel(
-                        "No Window Selected", 
-                        "No window is currently selected. The application will use mock screenshots instead of live capture.\n\n"
-                        "Do you want to continue?",
-                        icon=messagebox.WARNING
-                    )
-                    if not result:
-                        return
+            if not self.selected_window_info and not self.config.get('auto_detect_poker', True):
+                result = messagebox.askokcancel(
+                    "No Window Selected", 
+                    "No window is currently selected. The application will use mock screenshots instead of live capture.\n\n"
+                    "Do you want to continue?",
+                    icon=messagebox.WARNING
+                )
+                if not result:
+                    return
             
             # Update config with current values
             self.config['capture_interval'] = float(self.interval_var.get())
             self.config['auto_play'] = self.auto_play_var.get()
+            self.config['show_debug_overlay'] = self.show_overlay_var.get()
             
             # Initialize and start the poker assistant
-            if not self.poker_assistant:
-                self.poker_assistant = PokerAssistant(config_file=None)
-                # Set the config directly
-                self.poker_assistant.config.update(self.config)
+            if not hasattr(self, 'poker_assistant') or not self.poker_assistant:
+                # Create a temporary config file
+                temp_config_path = "temp_config.json"
+                with open(temp_config_path, 'w') as f:
+                    json.dump(self.config, f, indent=2)
                 
-                # Pass window info to the screen grabber if available
-                if self.selected_window_info:
-                    # Make sure screen grabber exists and has the select_window method
-                    if hasattr(self.poker_assistant, 'screen_grabber') and hasattr(self.poker_assistant.screen_grabber, 'select_window'):
-                        self.poker_assistant.screen_grabber.select_window(self.selected_window_info)
-                        
-                        if hasattr(self.window_detector, 'roi') and hasattr(self.poker_assistant.screen_grabber, 'roi'):
-                            self.poker_assistant.screen_grabber.roi = copy.deepcopy(self.window_detector.roi)
-                        # Print debug info
-                        logger.info(f"Selected window passed to screen grabber: {self.selected_window_info.title}")
-                        logger.info(f"Handle: {self.selected_window_info.handle}")
-                        if self.selected_window_info.rect:
-                            logger.info(f"Rect: {self.selected_window_info.rect}")
+                # Create the poker assistant with our config
+                self.poker_assistant = PokerAssistant(config_file=temp_config_path)
+                
+                # Clean up temp file
+                try:
+                    os.remove(temp_config_path)
+                except:
+                    pass
+            else:
+                # Update existing assistant's config
+                self.poker_assistant.config.update(self.config)
             
-            # Make sure poker_assistant is initialized
-            if not self.poker_assistant:
-                logger.error("Failed to initialize poker assistant")
-                messagebox.showerror("Error", "Failed to initialize poker assistant")
-                return
+            # Pass window info if available
+            if self.selected_window_info:
+                self.poker_assistant.select_window(self.selected_window_info.title)
             
-            # Start the poker assistant
+            # Start the assistant
             success = self.poker_assistant.start()
+            
             if not success:
-                logger.error("Poker assistant failed to start")
-                messagebox.showerror("Error", "Poker assistant failed to start")
+                messagebox.showerror("Error", "Failed to start Poker Assistant")
                 return
             
             # Update UI
             self.start_btn.config(state=tk.DISABLED)
             self.stop_btn.config(state=tk.NORMAL)
-            self.status_var.set("Poker Assistant started with PyTorch backend")
-            
-            # Start updating the UI with latest data
-            self._schedule_ui_update()
+            self.status_var.set("Poker Assistant started")
             
             # Update model info display
-            model_path = self.config.get('model_path', 'Default PyTorch model')
-            self.model_info_var.set(f"Using: {os.path.basename(model_path) if model_path else 'Default PyTorch model'}")
+            model_path = self.config.get('model_path', 'Default model')
+            self.model_info_var.set(f"Using: {os.path.basename(model_path) if model_path else 'Default model'}")
         
         except Exception as e:
+            logger.error(f"Error starting assistant: {str(e)}", exc_info=True)
             messagebox.showerror("Error", f"Failed to start Poker Assistant: {str(e)}")
-            logger.error(f"Failed to start Poker Assistant: {str(e)}", exc_info=True)  # Log full exception info
+            self.status_var.set(f"Error starting assistant: {str(e)}")
     
     def _stop_assistant(self):
-        """Stop the poker assistant"""
-        if self.poker_assistant:
-            self.poker_assistant.stop()
-            
-            # Update UI
-            self.start_btn.config(state=tk.NORMAL)
-            self.stop_btn.config(state=tk.DISABLED)
-            self.status_var.set("Poker Assistant stopped")
+        """Stop the poker assistant with improved error handling"""
+        try:
+            if hasattr(self, 'poker_assistant') and self.poker_assistant:
+                self.poker_assistant.stop()
+                
+                # Update UI
+                self.start_btn.config(state=tk.NORMAL)
+                self.stop_btn.config(state=tk.DISABLED)
+                self.status_var.set("Poker Assistant stopped")
+            else:
+                self.status_var.set("Poker Assistant not running")
+        except Exception as e:
+            logger.error(f"Error stopping assistant: {str(e)}", exc_info=True)
+            messagebox.showerror("Error", f"Failed to stop Poker Assistant: {str(e)}")
+            self.status_var.set(f"Error stopping assistant: {str(e)}")
     
     def _toggle_auto_play(self):
         """Toggle auto-play mode"""
-        if self.poker_assistant:
-            self.poker_assistant.config['auto_play'] = self.auto_play_var.get()
-        
-        if self.auto_play_var.get():
-            self.status_var.set("Auto-play enabled")
-        else:
-            self.status_var.set("Auto-play disabled")
+        try:
+            if hasattr(self, 'poker_assistant') and self.poker_assistant:
+                self.poker_assistant.config['auto_play'] = self.auto_play_var.get()
+            
+            self.config['auto_play'] = self.auto_play_var.get()
+            
+            if self.auto_play_var.get():
+                self.status_var.set("Auto-play enabled")
+            else:
+                self.status_var.set("Auto-play disabled")
+        except Exception as e:
+            logger.error(f"Error toggling auto-play: {str(e)}")
+            self.status_var.set(f"Error toggling auto-play: {str(e)}")
     
-    def _update_ui(self):
-        """Update the UI with the latest game state and decision"""
-        if self.poker_assistant and self.poker_assistant.running:
-            latest = self.poker_assistant.get_latest_state()
+    def _toggle_debug_overlay(self):
+        """Toggle the debug overlay display"""
+        try:
+            overlay_enabled = self.show_overlay_var.get()
             
-            if latest['game_state']:
-                # Update game state display
-                self.game_state_text.delete(1.0, tk.END)
-                self.game_state_text.insert(tk.END, json.dumps(latest['game_state'], indent=2))
+            # Update window detector
+            if hasattr(self, 'window_detector'):
+                self.window_detector.show_debug_overlay = overlay_enabled
             
-            if latest['decision']:
-                # Update decision display
-                action = latest['decision']['action']
-                confidence = latest['decision']['confidence']
-                bet_size = latest['decision']['bet_size_percentage']
+            # Update config
+            self.config['show_debug_overlay'] = overlay_enabled
+            
+            # Update poker assistant if running
+            if hasattr(self, 'poker_assistant') and self.poker_assistant:
+                if hasattr(self.poker_assistant, 'screen_grabber'):
+                    self.poker_assistant.screen_grabber.show_debug_overlay = overlay_enabled
+            
+            self.status_var.set(f"Debug overlay {'enabled' if overlay_enabled else 'disabled'}")
+            
+            # Refresh the preview
+            self._preview_selected_window()
+        except Exception as e:
+            logger.error(f"Error toggling debug overlay: {str(e)}")
+            self.status_var.set(f"Error toggling debug overlay: {str(e)}")
+    
+    def _update_ui_status(self):
+        """Update UI with the latest game state and decision"""
+        try:
+            if hasattr(self, 'poker_assistant') and self.poker_assistant and hasattr(self.poker_assistant, 'running') and self.poker_assistant.running:
+                latest = self.poker_assistant.get_latest_state()
                 
-                self.action_var.set(action.upper())
-                self.confidence_var.set(f"{confidence:.2f}")
-                self.bet_size_var.set(f"{bet_size * 100:.1f}% of pot")
+                if latest['game_state']:
+                    # Update game state display
+                    self.game_state_text.config(state=tk.NORMAL)
+                    self.game_state_text.delete(1.0, tk.END)
+                    self.game_state_text.insert(tk.END, json.dumps(latest['game_state'], indent=2))
+                    self.game_state_text.config(state=tk.DISABLED)
                 
-                # In a real implementation, you'd calculate these from the game state
-                self.hand_strength_var.set("Flush Draw")
-                self.equity_var.set("32%")
-            
-            # Update preview with latest screenshot
-            self._update_latest_screenshot_display()
+                if latest['decision']:
+                    # Update decision display
+                    action = latest['decision']['action']
+                    confidence = latest['decision']['confidence']
+                    bet_size = latest['decision']['bet_size_percentage']
+                    
+                    self.action_var.set(action.upper())
+                    self.confidence_var.set(f"{confidence:.2f}")
+                    self.bet_size_var.set(f"{bet_size * 100:.1f}% of pot")
+                    
+                    # Hand strength would be calculated from the game state
+                    # This is a simplification
+                    if 'game_state' in latest and latest['game_state']:
+                        if 'players' in latest['game_state'] and 1 in latest['game_state']['players']:
+                            player = latest['game_state']['players'][1]
+                            if 'cards' in player and len(player['cards']) == 2:
+                                # Simple display for now
+                                cards_str = ", ".join([f"{c['value']} of {c['suit']}" for c in player['cards']])
+                                self.hand_strength_var.set(cards_str)
+                                
+                                # Equity is usually calculated through simulations
+                                self.equity_var.set("~30%")  # Placeholder
+                
+                # Update stats
+                if 'stats' in latest:
+                    stats_text = (
+                        f"Screenshots: {latest['stats'].get('screenshots_captured', 0)}\n"
+                        f"Analyses: {latest['stats'].get('analyses_completed', 0)}\n"
+                        f"Decisions: {latest['stats'].get('decisions_made', 0)}\n"
+                        f"Analysis time: {latest['stats'].get('avg_analysis_time', 0):.2f}s\n"
+                        f"Decision time: {latest['stats'].get('avg_decision_time', 0):.2f}s\n"
+                        f"Errors: {latest['stats'].get('errors', 0)}"
+                    )
+                    
+                    self.stats_text.config(state=tk.NORMAL)
+                    self.stats_text.delete(1.0, tk.END)
+                    self.stats_text.insert(tk.END, stats_text)
+                    self.stats_text.config(state=tk.DISABLED)
+        except Exception as e:
+            logger.error(f"Error updating UI status: {str(e)}")
         
         # Schedule the next update
-        self.update_id = self.root.after(1000, self._update_ui)
+        refresh_rate = float(self.config.get('ui_refresh_rate', 1.0))
+        self.status_update_id = self.root.after(int(refresh_rate * 1000), self._update_ui_status)
     
-    def _schedule_ui_update(self):
-        """Schedule periodic UI updates"""
-        self._update_ui()
+    def _schedule_status_update(self):
+        """Schedule periodic UI status updates"""
+        self._update_ui_status()
     
-    def _load_config(self):
+    def _load_config_file(self):
         """Load configuration from a file"""
-        filename = filedialog.askopenfilename(
-            title="Load Configuration",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
-        
-        if filename:
-            try:
-                with open(filename, 'r') as f:
-                    config = json.load(f)
-                
-                self.config.update(config)
-                
-                # Update UI elements with loaded config
-                self.interval_var.set(str(self.config['capture_interval']))
-                self.auto_play_var.set(self.config['auto_play'])
-                
-                self.status_var.set(f"Configuration loaded from {filename}")
-                logger.info(f"Configuration loaded from {filename}")
-                
-                # Update model info if available
-                if 'model_path' in config and config['model_path']:
-                    self.model_info_var.set(f"Using: {os.path.basename(config['model_path'])}")
+        try:
+            filename = filedialog.askopenfilename(
+                title="Load Configuration",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+            )
             
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to load configuration: {str(e)}")
-                logger.error(f"Failed to load configuration: {str(e)}")
+            if not filename:
+                return
+                
+            # Load the configuration
+            with open(filename, 'r') as f:
+                loaded_config = json.load(f)
+            
+            # Update our config
+            self.config.update(loaded_config)
+            
+            # Update UI elements with loaded config
+            self.interval_var.set(str(self.config.get('capture_interval', 2.0)))
+            self.auto_play_var.set(self.config.get('auto_play', False))
+            self.show_overlay_var.set(self.config.get('show_debug_overlay', True))
+            
+            # Update window detector if needed
+            if hasattr(self, 'window_detector'):
+                self.window_detector.show_debug_overlay = self.config.get('show_debug_overlay', True)
+            
+            self.status_var.set(f"Configuration loaded from {filename}")
+            
+            # Update model info if available
+            if 'model_path' in self.config and self.config['model_path']:
+                self.model_info_var.set(f"Using: {os.path.basename(self.config['model_path'])}")
+            
+            messagebox.showinfo("Configuration", f"Configuration loaded from {filename}")
+        except Exception as e:
+            logger.error(f"Error loading configuration: {str(e)}", exc_info=True)
+            messagebox.showerror("Error", f"Failed to load configuration: {str(e)}")
+            self.status_var.set(f"Error loading configuration: {str(e)}")
     
-    def _save_config(self):
+    def _save_config_file(self):
         """Save configuration to a file"""
-        filename = filedialog.asksaveasfilename(
-            title="Save Configuration",
-            defaultextension=".json",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
-        
-        if filename:
-            try:
-                # Update config with current UI values
-                self.config['capture_interval'] = float(self.interval_var.get())
-                self.config['auto_play'] = self.auto_play_var.get()
-                
-                with open(filename, 'w') as f:
-                    json.dump(self.config, f, indent=2)
-                
-                self.status_var.set(f"Configuration saved to {filename}")
-                logger.info(f"Configuration saved to {filename}")
+        try:
+            # Update config with current UI values
+            self.config['capture_interval'] = float(self.interval_var.get())
+            self.config['auto_play'] = self.auto_play_var.get()
+            self.config['show_debug_overlay'] = self.show_overlay_var.get()
             
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to save configuration: {str(e)}")
-                logger.error(f"Failed to save configuration: {str(e)}")
+            # Get save file path
+            filename = filedialog.asksaveasfilename(
+                title="Save Configuration",
+                defaultextension=".json",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+            )
+            
+            if not filename:
+                return
+                
+            # Save the config
+            with open(filename, 'w') as f:
+                json.dump(self.config, f, indent=2)
+            
+            self.status_var.set(f"Configuration saved to {filename}")
+            messagebox.showinfo("Configuration", f"Configuration saved to {filename}")
+        except Exception as e:
+            logger.error(f"Error saving configuration: {str(e)}", exc_info=True)
+            messagebox.showerror("Error", f"Failed to save configuration: {str(e)}")
+            self.status_var.set(f"Error saving configuration: {str(e)}")
     
     def _show_settings(self):
         """Show settings dialog"""
-        settings_window = tk.Toplevel(self.root)
-        settings_window.title("Settings - PyTorch")
-        settings_window.geometry("800x1200+1080+800")  # Slightly taller for PyTorch info
-        settings_window.transient(self.root)
-        settings_window.grab_set()
-        
-        # Create settings form
-        frame = ttk.Frame(settings_window, padding="10")
-        frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Directories section
-        ttk.Label(frame, text="Directories", font=("TkDefaultFont", 12, "bold")).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
-        ttk.Label(frame, text="Debugging", font=("TkDefaultFont", 12, "bold")).grid(row=15, column=0, columnspan=3, sticky=tk.W, pady=(20, 10))
-
-        # Screenshot directory
-        ttk.Label(frame, text="Screenshot Directory:").grid(row=1, column=0, sticky=tk.W, pady=5)
-        screenshot_dir_var = tk.StringVar(value=self.config['screenshot_dir'])
-        ttk.Entry(frame, textvariable=screenshot_dir_var, width=40).grid(row=1, column=1, padx=5, pady=5, sticky=tk.W)
-        ttk.Button(frame, text="...", width=3, command=lambda: self._browse_directory(screenshot_dir_var)).grid(row=1, column=2, padx=5)
-        
-        ttk.Label(frame, text="Game State Directory:").grid(row=2, column=0, sticky=tk.W, pady=5)
-        game_state_dir_var = tk.StringVar(value=self.config['game_state_dir'])
-        ttk.Entry(frame, textvariable=game_state_dir_var, width=40).grid(row=2, column=1, padx=5, pady=5, sticky=tk.W)
-        ttk.Button(frame, text="...", width=3, command=lambda: self._browse_directory(game_state_dir_var)).grid(row=2, column=2, padx=5)
-        
-        # Training data directory
-        ttk.Label(frame, text="Training Data Directory:").grid(row=3, column=0, sticky=tk.W, pady=5)
-        training_dir_var = tk.StringVar(value=self.config['training_data_dir'])
-        ttk.Entry(frame, textvariable=training_dir_var, width=40).grid(row=3, column=1, padx=5, pady=5, sticky=tk.W)
-        ttk.Button(frame, text="...", width=3, command=lambda: self._browse_directory(training_dir_var)).grid(row=3, column=2, padx=5)
-        
-        # Model settings
-        ttk.Label(frame, text="PyTorch Model", font=("TkDefaultFont", 12, "bold")).grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(20, 10))
-        
-        # Model path
-        ttk.Label(frame, text="Model Path (.pt):").grid(row=5, column=0, sticky=tk.W, pady=5)
-        model_path_var = tk.StringVar(value=self.config['model_path'] or "")
-        ttk.Entry(frame, textvariable=model_path_var, width=40).grid(row=5, column=1, padx=5, pady=5, sticky=tk.W)
-        ttk.Button(frame, text="...", width=3, command=lambda: self._browse_file(model_path_var, [("PyTorch models", "*.pt"), ("All files", "*.*")])).grid(row=5, column=2, padx=5)
-        
-        # Model save path
-        ttk.Label(frame, text="Model Save Path:").grid(row=6, column=0, sticky=tk.W, pady=5)
-        model_save_var = tk.StringVar(value=self.config['model_save_path'] or "poker_model.pt")
-        ttk.Entry(frame, textvariable=model_save_var, width=40).grid(row=6, column=1, padx=5, pady=5, sticky=tk.W)
-        ttk.Button(frame, text="...", width=3, command=lambda: self._browse_save_file(model_save_var, [("PyTorch models", "*.pt"), ("All files", "*.*")])).grid(row=6, column=2, padx=5)
-        
-        # PyTorch-specific settings
-        ttk.Label(frame, text="Device:").grid(row=7, column=0, sticky=tk.W, pady=5)
-        device_var = tk.StringVar(value="cuda" if torch.cuda.is_available() else "cpu")
-        device_combo = ttk.Combobox(frame, textvariable=device_var, values=["cpu", "cuda"], state="readonly", width=10)
-        device_combo.grid(row=7, column=1, sticky=tk.W, padx=5, pady=5)
-        
-        ttk.Label(frame, text="Debugging", font=("TkDefaultFont", 12, "bold")).grid(row=15, column=0, columnspan=3, sticky=tk.W, pady=(20, 10))
-
-        # Show region overlays
-        show_overlay_var = tk.BooleanVar(value=self.config.get('show_debug_overlay', True))
-        ttk.Checkbutton(frame, text="Show region debugging overlay", variable=show_overlay_var).grid(row=16, column=0, columnspan=2, sticky=tk.W, pady=5)
-
-
-        # Window capture settings
-        ttk.Label(frame, text="Window Capture", font=("TkDefaultFont", 12, "bold")).grid(row=8, column=0, columnspan=3, sticky=tk.W, pady=(20, 10))
-        
-        # Auto-detect PokerTH
-        auto_detect_var = tk.BooleanVar(value=self.config.get('auto_detect_poker', True))
-        ttk.Checkbutton(frame, text="Auto-detect PokerTH window", variable=auto_detect_var).grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=5)
-        
-        # Use mock data if no window
-        mock_data_var = tk.BooleanVar(value=self.config.get('use_mock_data', True))
-        ttk.Checkbutton(frame, text="Use mock data if no window available", variable=mock_data_var).grid(row=10, column=0, columnspan=2, sticky=tk.W, pady=5)
-        
-        # Auto-play settings
-        ttk.Label(frame, text="Auto-play", font=("TkDefaultFont", 12, "bold")).grid(row=11, column=0, columnspan=3, sticky=tk.W, pady=(20, 10))
-        
-        # Enable auto-play
-        auto_play_var = tk.BooleanVar(value=self.config['auto_play'])
-        ttk.Checkbutton(frame, text="Enable Auto-play", variable=auto_play_var).grid(row=12, column=0, columnspan=2, sticky=tk.W, pady=5)
-        
-        # Confidence threshold
-        ttk.Label(frame, text="Confidence Threshold:").grid(row=13, column=0, sticky=tk.W, pady=5)
-        confidence_var = tk.StringVar(value=str(self.config['confidence_threshold']))
-        ttk.Spinbox(frame, from_=0.0, to=1.0, increment=0.05, textvariable=confidence_var, width=10).grid(row=13, column=1, sticky=tk.W, padx=5, pady=5)
-        
-        # Buttons
-        button_frame = ttk.Frame(frame)
-        button_frame.grid(row=14, column=0, columnspan=3, pady=20)
-        
-        ttk.Button(button_frame, text="Save", command=lambda: self._save_settings(
-            screenshot_dir_var.get(),
-            game_state_dir_var.get(),
-            training_dir_var.get(),
-            model_path_var.get(),
-            model_save_var.get(),
-            device_var.get(),
-            auto_detect_var.get(),
-            mock_data_var.get(),
-            auto_play_var.get(),
-            show_overlay_var.get(),
-            float(confidence_var.get()),
-            settings_window
-        )).pack(side=tk.LEFT, padx=10)
-        
-        ttk.Button(button_frame, text="Cancel", command=settings_window.destroy).pack(side=tk.LEFT, padx=10)
+        try:
+            settings_window = tk.Toplevel(self.root)
+            settings_window.title("Settings")
+            settings_window.geometry("800x600")
+            settings_window.transient(self.root)
+            settings_window.grab_set()
+            
+            # Create settings form
+            frame = ttk.Frame(settings_window, padding="10")
+            frame.pack(fill=tk.BOTH, expand=True)
+            
+            # Notebook for tabbed settings
+            settings_notebook = ttk.Notebook(frame)
+            settings_notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+            
+            # General settings tab
+            general_tab = ttk.Frame(settings_notebook)
+            settings_notebook.add(general_tab, text="General")
+            
+            # Directories section
+            ttk.Label(general_tab, text="Directories", font=("TkDefaultFont", 12, "bold")).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+            
+            # Screenshot directory
+            ttk.Label(general_tab, text="Screenshot Directory:").grid(row=1, column=0, sticky=tk.W, pady=5)
+            screenshot_dir_var = tk.StringVar(value=self.config.get('screenshot_dir', 'poker_data/screenshots'))
+            ttk.Entry(general_tab, textvariable=screenshot_dir_var, width=40).grid(row=1, column=1, padx=5, pady=5, sticky=tk.W)
+            ttk.Button(general_tab, text="...", width=3, command=lambda: self._browse_directory(screenshot_dir_var)).grid(row=1, column=2, padx=5)
+            
+            ttk.Label(general_tab, text="Game State Directory:").grid(row=2, column=0, sticky=tk.W, pady=5)
+            game_state_dir_var = tk.StringVar(value=self.config.get('game_state_dir', 'poker_data/game_states'))
+            ttk.Entry(general_tab, textvariable=game_state_dir_var, width=40).grid(row=2, column=1, padx=5, pady=5, sticky=tk.W)
+            ttk.Button(general_tab, text="...", width=3, command=lambda: self._browse_directory(game_state_dir_var)).grid(row=2, column=2, padx=5)
+            
+            # Training data directory
+            ttk.Label(general_tab, text="Training Data Directory:").grid(row=3, column=0, sticky=tk.W, pady=5)
+            training_dir_var = tk.StringVar(value=self.config.get('training_data_dir', 'poker_data/training'))
+            ttk.Entry(general_tab, textvariable=training_dir_var, width=40).grid(row=3, column=1, padx=5, pady=5, sticky=tk.W)
+            ttk.Button(general_tab, text="...", width=3, command=lambda: self._browse_directory(training_dir_var)).grid(row=3, column=2, padx=5)
+            
+            # Model settings section
+            ttk.Label(general_tab, text="Model Settings", font=("TkDefaultFont", 12, "bold")).grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(20, 10))
+            
+            # Model path
+            ttk.Label(general_tab, text="Model Path:").grid(row=5, column=0, sticky=tk.W, pady=5)
+            model_path_var = tk.StringVar(value=self.config.get('model_path', ''))
+            ttk.Entry(general_tab, textvariable=model_path_var, width=40).grid(row=5, column=1, padx=5, pady=5, sticky=tk.W)
+            ttk.Button(general_tab, text="...", width=3, command=lambda: self._browse_file(model_path_var, [("Model files", "*.pt")])).grid(row=5, column=2, padx=5)
+            
+            # Model save path
+            ttk.Label(general_tab, text="Model Save Path:").grid(row=6, column=0, sticky=tk.W, pady=5)
+            model_save_var = tk.StringVar(value=self.config.get('model_save_path', 'models/poker_model.pt'))
+            ttk.Entry(general_tab, textvariable=model_save_var, width=40).grid(row=6, column=1, padx=5, pady=5, sticky=tk.W)
+            ttk.Button(general_tab, text="...", width=3, command=lambda: self._browse_save_file(model_save_var, [("Model files", "*.pt")])).grid(row=6, column=2, padx=5)
+            
+            # Device selection
+            ttk.Label(general_tab, text="Device:").grid(row=7, column=0, sticky=tk.W, pady=5)
+            device_var = tk.StringVar(value=self.config.get('device', 'auto'))
+            device_options = ['auto', 'cpu', 'cuda']
+            if not torch.cuda.is_available():
+                # If CUDA not available, show only CPU option
+                device_options = ['cpu']
+                device_var.set('cpu')
+            
+            device_combo = ttk.Combobox(general_tab, textvariable=device_var, values=device_options, state="readonly", width=10)
+            device_combo.grid(row=7, column=1, sticky=tk.W, padx=5, pady=5)
+            
+            # Advanced tab
+            advanced_tab = ttk.Frame(settings_notebook)
+            settings_notebook.add(advanced_tab, text="Advanced")
+            
+            # Auto-play settings
+            ttk.Label(advanced_tab, text="Auto-play Settings", font=("TkDefaultFont", 12, "bold")).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+            
+            # Enable auto-play
+            auto_play_var = tk.BooleanVar(value=self.config.get('auto_play', False))
+            ttk.Checkbutton(advanced_tab, text="Enable Auto-play", variable=auto_play_var).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=5)
+            
+            # Confidence threshold
+            ttk.Label(advanced_tab, text="Confidence Threshold:").grid(row=2, column=0, sticky=tk.W, pady=5)
+            confidence_var = tk.StringVar(value=str(self.config.get('confidence_threshold', 0.7)))
+            ttk.Spinbox(advanced_tab, from_=0.0, to=1.0, increment=0.05, textvariable=confidence_var, width=10).grid(row=2, column=1, sticky=tk.W, padx=5, pady=5)
+            
+            # Window capture settings
+            ttk.Label(advanced_tab, text="Window Capture Settings", font=("TkDefaultFont", 12, "bold")).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(20, 10))
+            
+            # Auto-detect poker
+            auto_detect_var = tk.BooleanVar(value=self.config.get('auto_detect_poker', True))
+            ttk.Checkbutton(advanced_tab, text="Auto-detect poker window", variable=auto_detect_var).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=5)
+            
+            # Use mock data
+            mock_data_var = tk.BooleanVar(value=self.config.get('use_mock_data', True))
+            ttk.Checkbutton(advanced_tab, text="Use mock data if no window available", variable=mock_data_var).grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=5)
+            
+            # Show debug overlay
+            show_overlay_var = tk.BooleanVar(value=self.config.get('show_debug_overlay', True))
+            ttk.Checkbutton(advanced_tab, text="Show debug overlay on screenshots", variable=show_overlay_var).grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=5)
+            
+            # Capture interval
+            ttk.Label(advanced_tab, text="Capture Interval (seconds):").grid(row=7, column=0, sticky=tk.W, pady=5)
+            interval_var = tk.StringVar(value=str(self.config.get('capture_interval', 2.0)))
+            ttk.Spinbox(advanced_tab, from_=0.5, to=10.0, increment=0.5, textvariable=interval_var, width=10).grid(row=7, column=1, sticky=tk.W, padx=5, pady=5)
+            
+            # UI refresh rate
+            ttk.Label(advanced_tab, text="UI Refresh Rate (seconds):").grid(row=8, column=0, sticky=tk.W, pady=5)
+            refresh_var = tk.StringVar(value=str(self.config.get('ui_refresh_rate', 1.0)))
+            ttk.Spinbox(advanced_tab, from_=0.1, to=5.0, increment=0.1, textvariable=refresh_var, width=10).grid(row=8, column=1, sticky=tk.W, padx=5, pady=5)
+            
+            # Debugging
+            ttk.Label(advanced_tab, text="Debugging", font=("TkDefaultFont", 12, "bold")).grid(row=9, column=0, columnspan=3, sticky=tk.W, pady=(20, 10))
+            
+            # Log level
+            ttk.Label(advanced_tab, text="Log Level:").grid(row=10, column=0, sticky=tk.W, pady=5)
+            log_level_var = tk.StringVar(value=self.config.get('log_level', 'INFO'))
+            log_level_combo = ttk.Combobox(advanced_tab, textvariable=log_level_var, values=['DEBUG', 'INFO', 'WARNING', 'ERROR'], state="readonly", width=10)
+            log_level_combo.grid(row=10, column=1, sticky=tk.W, padx=5, pady=5)
+            
+            # Buttons
+            button_frame = ttk.Frame(frame)
+            button_frame.pack(pady=20)
+            
+            ttk.Button(button_frame, text="Save", command=lambda: self._save_settings(
+                screenshot_dir_var.get(),
+                game_state_dir_var.get(),
+                training_dir_var.get(),
+                model_path_var.get(),
+                model_save_var.get(),
+                device_var.get(),
+                auto_play_var.get(),
+                float(confidence_var.get()),
+                auto_detect_var.get(),
+                mock_data_var.get(),
+                show_overlay_var.get(),
+                float(interval_var.get()),
+                float(refresh_var.get()),
+                log_level_var.get(),
+                settings_window
+            )).pack(side=tk.LEFT, padx=10)
+            
+            ttk.Button(button_frame, text="Cancel", command=settings_window.destroy).pack(side=tk.LEFT, padx=10)
+        except Exception as e:
+            logger.error(f"Error showing settings dialog: {str(e)}", exc_info=True)
+            messagebox.showerror("Error", f"Failed to show settings dialog: {str(e)}")
     
     def _browse_directory(self, string_var):
         """Browse for a directory and update the string variable"""
@@ -910,14 +1004,16 @@ class PokerScreenGrabberApp:
         file_path = filedialog.asksaveasfilename(
             initialdir=os.path.dirname(string_var.get()) if string_var.get() else None,
             filetypes=filetypes,
-            defaultextension=".pt"
+            defaultextension=filetypes[0][1].split(".")[-1]
         )
         if file_path:
             string_var.set(file_path)
     
     def _save_settings(self, screenshot_dir, game_state_dir, training_dir, 
-                      model_path, model_save_path, device, auto_detect_poker, 
-                      use_mock_data, auto_play,show_overlay_var, confidence, window):
+                      model_path, model_save_path, device, auto_play,
+                      confidence, auto_detect_poker, use_mock_data,
+                      show_debug_overlay, capture_interval, ui_refresh_rate,
+                      log_level, window):
         """Save settings from the dialog"""
         try:
             # Update configuration
@@ -927,56 +1023,142 @@ class PokerScreenGrabberApp:
             self.config['model_path'] = model_path
             self.config['model_save_path'] = model_save_path
             self.config['device'] = device
-            self.config['auto_detect_poker'] = auto_detect_poker
-            self.config['use_mock_data'] = use_mock_data
             self.config['auto_play'] = auto_play
             self.config['confidence_threshold'] = confidence
-
-            self.config['show_debug_overlay'] = show_overlay_var.get()
+            self.config['auto_detect_poker'] = auto_detect_poker
+            self.config['use_mock_data'] = use_mock_data
+            self.config['show_debug_overlay'] = show_debug_overlay
+            self.config['capture_interval'] = capture_interval
+            self.config['ui_refresh_rate'] = ui_refresh_rate
+            self.config['log_level'] = log_level
+            
             # Create directories if they don't exist
             for dir_path in [screenshot_dir, game_state_dir, training_dir]:
                 os.makedirs(dir_path, exist_ok=True)
             
             # Update the assistant's configuration if it exists
-            if self.poker_assistant:
+            if hasattr(self, 'poker_assistant') and self.poker_assistant:
                 self.poker_assistant.config.update(self.config)
             
             # Update UI elements
             self.auto_play_var.set(auto_play)
+            self.interval_var.set(str(capture_interval))
+            self.show_overlay_var.set(show_debug_overlay)
+            
+            # Update window detector debug overlay if it exists
+            if hasattr(self, 'window_detector'):
+                self.window_detector.show_debug_overlay = show_debug_overlay
             
             # Update model info display
-            self.model_info_var.set(f"Using: {os.path.basename(model_path) if model_path else 'Default PyTorch model'}")
+            self.model_info_var.set(f"Using: {os.path.basename(model_path) if model_path else 'Default model'}")
             
             self.status_var.set("Settings saved")
             window.destroy()
+            
+            # Offer to save to file
+            result = messagebox.askyesno(
+                "Save Settings", 
+                "Would you like to save these settings to a configuration file for future use?"
+            )
+            
+            if result:
+                self._save_config_file()
         
         except Exception as e:
+            logger.error(f"Error saving settings: {str(e)}", exc_info=True)
             messagebox.showerror("Error", f"Failed to save settings: {str(e)}")
-            logger.error(f"Failed to save settings: {str(e)}")
     
-    def _train_network(self):
-        """Train the neural network with PyTorch"""
-        if not self.poker_assistant:
-            messagebox.showinfo("Info", "Please start the Poker Assistant first")
-            return
-        
-        result = messagebox.askyesno(
-            "Train Neural Network (PyTorch)",
-            "This will train the PyTorch neural network using the collected data.\n"
-            "Training may take some time. Continue?"
-        )
-        
-        if result:
+    def _train_model(self):
+        """Train the neural network model"""
+        try:
+            # Check if poker assistant is available
+            if not hasattr(self, 'poker_assistant') or not self.poker_assistant:
+                # Create a new assistant for training
+                self.status_var.set("Initializing Poker Assistant for training...")
+                
+                # Create a temporary config file
+                temp_config_path = "temp_config.json"
+                with open(temp_config_path, 'w') as f:
+                    json.dump(self.config, f, indent=2)
+                
+                # Create the poker assistant with our config
+                self.poker_assistant = PokerAssistant(config_file=temp_config_path)
+                
+                # Clean up temp file
+                try:
+                    os.remove(temp_config_path)
+                except:
+                    pass
+            
+            # Show training options dialog
+            train_window = tk.Toplevel(self.root)
+            train_window.title("Train Model")
+            train_window.geometry("400x300")
+            train_window.transient(self.root)
+            train_window.grab_set()
+            
+            # Create form
+            frame = ttk.Frame(train_window, padding="10")
+            frame.pack(fill=tk.BOTH, expand=True)
+            
+            # Training parameters
+            ttk.Label(frame, text="Training Parameters", font=("TkDefaultFont", 12, "bold")).grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+            
+            # Epochs
+            ttk.Label(frame, text="Epochs:").grid(row=1, column=0, sticky=tk.W, pady=5)
+            epochs_var = tk.StringVar(value="50")
+            ttk.Spinbox(frame, from_=1, to=1000, textvariable=epochs_var, width=10).grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
+            
+            # Batch size
+            ttk.Label(frame, text="Batch Size:").grid(row=2, column=0, sticky=tk.W, pady=5)
+            batch_size_var = tk.StringVar(value="32")
+            ttk.Spinbox(frame, from_=1, to=256, textvariable=batch_size_var, width=10).grid(row=2, column=1, sticky=tk.W, padx=5, pady=5)
+            
+            # Learning rate
+            ttk.Label(frame, text="Learning Rate:").grid(row=3, column=0, sticky=tk.W, pady=5)
+            learning_rate_var = tk.StringVar(value="0.001")
+            ttk.Entry(frame, textvariable=learning_rate_var, width=10).grid(row=3, column=1, sticky=tk.W, padx=5, pady=5)
+            
+            # Data directory
+            ttk.Label(frame, text="Training Data:").grid(row=4, column=0, sticky=tk.W, pady=5)
+            data_dir_var = tk.StringVar(value=self.config.get('training_data_dir', 'poker_data/training'))
+            ttk.Entry(frame, textvariable=data_dir_var, width=30).grid(row=4, column=1, padx=5, pady=5, sticky=tk.W)
+            ttk.Button(frame, text="...", width=3, command=lambda: self._browse_directory(data_dir_var)).grid(row=4, column=2, padx=5)
+            
+            # Buttons
+            button_frame = ttk.Frame(frame)
+            button_frame.grid(row=5, column=0, columnspan=3, pady=20)
+            
+            ttk.Button(button_frame, text="Start Training", command=lambda: self._start_training(
+                data_dir_var.get(),
+                int(epochs_var.get()),
+                int(batch_size_var.get()),
+                float(learning_rate_var.get()),
+                train_window
+            )).pack(side=tk.LEFT, padx=10)
+            
+            ttk.Button(button_frame, text="Cancel", command=train_window.destroy).pack(side=tk.LEFT, padx=10)
+        except Exception as e:
+            logger.error(f"Error preparing model training: {str(e)}", exc_info=True)
+            messagebox.showerror("Error", f"Failed to prepare model training: {str(e)}")
+            self.status_var.set(f"Error preparing model training: {str(e)}")
+    
+    def _start_training(self, data_dir, epochs, batch_size, learning_rate, window):
+        """Start the training process in a separate thread"""
+        try:
+            # Close the training dialog
+            window.destroy()
+            
             # Create a progress dialog
             progress_window = tk.Toplevel(self.root)
-            progress_window.title("Training PyTorch Neural Network")
+            progress_window.title("Training Model")
             progress_window.geometry("400x200")
             progress_window.transient(self.root)
             progress_window.grab_set()
             
             ttk.Label(
                 progress_window, 
-                text="Training PyTorch Model...",
+                text="Training Neural Network...",
                 font=("TkDefaultFont", 12, "bold")
             ).pack(pady=10)
             
@@ -993,672 +1175,419 @@ class PokerScreenGrabberApp:
             status_label.pack(pady=10)
             
             # Device info
-            device_info = f"Using device: {'CUDA' if torch.cuda.is_available() else 'CPU'}"
+            device_info = f"Using {'GPU' if torch.cuda.is_available() else 'CPU'}"
             ttk.Label(progress_window, text=device_info).pack(pady=5)
             
             # Use a thread to avoid blocking the UI
             def training_thread():
                 try:
-                    # Update progress periodically
-                    for i in range(0, 101, 10):
-                        progress_var.set(i)
-                        status_var.set(f"Training: {i}% complete")
-                        time.sleep(0.5)  # Simulate training time
+                    # Start training
+                    status_var.set("Checking training data...")
+                    progress_var.set(5)
                     
-                    # In a real implementation, this would train the PyTorch model
-                    # self.poker_assistant.train_from_collected_data()
+                    # Train the model
+                    history = self.poker_assistant.train_model(
+                        data_dir=data_dir,
+                        epochs=epochs,
+                        batch_size=batch_size,
+                        learning_rate=learning_rate
+                    )
                     
+                    # Check for errors
+                    if 'error' in history:
+                        status_var.set(f"Error: {history['error']}")
+                        messagebox.showerror("Training Error", history['error'])
+                        return
+                    
+                    # Training successful
                     status_var.set("Training complete!")
-                    messagebox.showinfo("Training Complete", "PyTorch neural network training completed successfully!")
-                    progress_window.destroy()
+                    progress_var.set(100)
                     
                     # Update model info
-                    model_path = self.config.get('model_save_path', 'poker_model.pt')
+                    model_path = self.config.get('model_save_path', 'models/poker_model.pt')
                     self.model_info_var.set(f"Using: {os.path.basename(model_path)}")
+                    
+                    messagebox.showinfo(
+                        "Training Complete", 
+                        f"Model training completed successfully!\n\n"
+                        f"Final accuracy: {history.get('accuracy', [0])[-1]:.2f}\n"
+                        f"Model saved to: {model_path}"
+                    )
+                    
+                    # Close progress window
+                    progress_window.destroy()
                 
                 except Exception as e:
+                    logger.error(f"Error during training: {str(e)}", exc_info=True)
                     status_var.set(f"Error: {str(e)}")
-                    messagebox.showerror("Error", f"PyTorch training failed: {str(e)}")
-                    logger.error(f"PyTorch training failed: {str(e)}")
+                    messagebox.showerror("Training Error", f"An error occurred during training: {str(e)}")
             
+            # Start the training thread
             threading.Thread(target=training_thread, daemon=True).start()
+            
+            # Update progress periodically (this is a separate update thread)
+            def update_progress():
+                if progress_window.winfo_exists():
+                    # Get the latest state if possible
+                    if hasattr(self, 'poker_assistant') and self.poker_assistant:
+                        latest = self.poker_assistant.get_latest_state()
+                        if 'training_progress' in latest:
+                            progress = latest['training_progress']
+                            progress_var.set(progress)
+                            status_var.set(f"Training: {progress:.1f}% complete")
+                    
+                    # Schedule the next update
+                    progress_window.after(500, update_progress)
+            
+            # Start progress updates
+            update_progress()
+            
+        except Exception as e:
+            logger.error(f"Error starting training: {str(e)}", exc_info=True)
+            messagebox.showerror("Error", f"Failed to start training: {str(e)}")
+            self.status_var.set(f"Error starting training: {str(e)}")
+    
+    def _calibrate_regions(self):
+        """Show dialog to calibrate ROI regions"""
+        try:
+            # Check if we have a window selected
+            if not self.selected_window_info:
+                messagebox.showwarning("Warning", "No window selected. Please select a window first.")
+                return
+            
+            # Show confirmation dialog
+            result = messagebox.askyesno(
+                "Calibrate Regions",
+                "This will recalibrate regions of interest based on the current window, " +
+                "overwriting any customizations. Continue?",
+                icon=messagebox.WARNING
+            )
+            
+            if not result:
+                return
+            
+            # Take a screenshot
+            if hasattr(self, 'window_detector'):
+                screenshot = self.window_detector.capture_screenshot(use_cache=False)
+                
+                if screenshot is not None:
+                    # Force recalibration
+                    success = self.window_detector.calibrate_roi_from_screenshot(screenshot, force_calibrate=True)
+                    
+                    if success:
+                        messagebox.showinfo("Success", "Regions successfully recalibrated.")
+                        
+                        # Sync with poker assistant if it exists
+                        if hasattr(self, 'poker_assistant') and self.poker_assistant:
+                            if hasattr(self.poker_assistant, 'screen_grabber') and hasattr(self.poker_assistant.screen_grabber, 'roi'):
+                                self.poker_assistant.screen_grabber.roi = self.window_detector.roi
+                                logger.info("ROI configuration synced with poker assistant")
+                    else:
+                        messagebox.showerror("Error", "Failed to recalibrate regions.")
+                else:
+                    messagebox.showerror("Error", "Failed to capture screenshot for calibration.")
+            else:
+                messagebox.showerror("Error", "Window detector not initialized")
+        except Exception as e:
+            logger.error(f"Error calibrating regions: {str(e)}", exc_info=True)
+            messagebox.showerror("Error", f"Failed to calibrate regions: {str(e)}")
+            self.status_var.set(f"Error calibrating regions: {str(e)}")
+    
+    def _analyze_screenshot(self):
+        """Analyze a single screenshot file"""
+        try:
+            # Get screenshot file
+            screenshot_path = filedialog.askopenfilename(
+                title="Select Screenshot to Analyze",
+                filetypes=[("PNG files", "*.png"), ("JPEG files", "*.jpg;*.jpeg"), ("All files", "*.*")]
+            )
+            
+            if not screenshot_path:
+                return
+            
+            # Check if poker assistant is initialized
+            if not hasattr(self, 'poker_assistant') or not self.poker_assistant:
+                self.status_var.set("Initializing Poker Assistant for analysis...")
+                
+                # Create a temporary config file
+                temp_config_path = "temp_config.json"
+                with open(temp_config_path, 'w') as f:
+                    json.dump(self.config, f, indent=2)
+                
+                # Create the poker assistant with our config
+                self.poker_assistant = PokerAssistant(config_file=temp_config_path)
+                
+                # Clean up temp file
+                try:
+                    os.remove(temp_config_path)
+                except:
+                    pass
+            
+            # Show progress dialog
+            progress_window = tk.Toplevel(self.root)
+            progress_window.title("Analyzing Screenshot")
+            progress_window.geometry("400x150")
+            progress_window.transient(self.root)
+            progress_window.grab_set()
+            
+            ttk.Label(
+                progress_window, 
+                text="Analyzing screenshot...",
+                font=("TkDefaultFont", 12, "bold")
+            ).pack(pady=10)
+            
+            status_var = tk.StringVar(value="Starting analysis...")
+            status_label = ttk.Label(progress_window, textvariable=status_var)
+            status_label.pack(pady=10)
+            
+            # Use a thread to avoid blocking the UI
+            def analysis_thread():
+                try:
+                    # Start analysis
+                    status_var.set("Analyzing screenshot...")
+                    
+                    # Analyze the screenshot
+                    result = self.poker_assistant.analyze_screenshot(screenshot_path)
+                    
+                    # Close progress window
+                    progress_window.destroy()
+                    
+                    # Check for errors
+                    if 'error' in result:
+                        messagebox.showerror("Analysis Error", result['error'])
+                        return
+                    
+                    # Display results in a new window
+                    result_window = tk.Toplevel(self.root)
+                    result_window.title("Analysis Results")
+                    result_window.geometry("800x600")
+                    result_window.transient(self.root)
+                    
+                    # Create paned window for results
+                    paned = ttk.PanedWindow(result_window, orient=tk.HORIZONTAL)
+                    paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+                    
+                    # Left side - Screenshot preview
+                    preview_frame = ttk.LabelFrame(paned, text="Screenshot")
+                    paned.add(preview_frame, weight=1)
+                    
+                    # Load and display the image
+                    img = cv2.imread(screenshot_path)
+                    if img is not None:
+                        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                        img = Image.fromarray(img)
+                        
+                        # Resize to fit
+                        max_width = 400
+                        max_height = 500
+                        img.thumbnail((max_width, max_height), Image.LANCZOS)
+                        
+                        img_tk = ImageTk.PhotoImage(image=img)
+                        label = ttk.Label(preview_frame, image=img_tk)
+                        label.image = img_tk  # Keep a reference
+                        label.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+                    
+                    # Right side - Analysis results
+                    results_frame = ttk.LabelFrame(paned, text="Analysis Results")
+                    paned.add(results_frame, weight=1)
+                    
+                    # Create a notebook for tabbed results
+                    results_notebook = ttk.Notebook(results_frame)
+                    results_notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+                    
+                    # Game state tab
+                    game_state_tab = ttk.Frame(results_notebook)
+                    results_notebook.add(game_state_tab, text="Game State")
+                    
+                    # Game state display
+                    game_state_text = tk.Text(game_state_tab, wrap=tk.WORD, width=40, height=20)
+                    game_state_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+                    game_state_text.insert(tk.END, json.dumps(result['game_state'], indent=2))
+                    game_state_text.config(state=tk.DISABLED)
+                    
+                    # Decision tab
+                    decision_tab = ttk.Frame(results_notebook)
+                    results_notebook.add(decision_tab, text="Decision")
+                    
+                    # Decision display
+                    ttk.Label(decision_tab, text="Recommended Action:").pack(anchor=tk.W, pady=(10, 5))
+                    ttk.Label(
+                        decision_tab, 
+                        text=result['decision']['action'].upper(),
+                        font=("TkDefaultFont", 12, "bold")
+                    ).pack(anchor=tk.W, padx=10)
+                    
+                    ttk.Label(decision_tab, text="Confidence:").pack(anchor=tk.W, pady=(10, 5))
+                    ttk.Label(
+                        decision_tab, 
+                        text=f"{result['decision']['confidence']:.2f}",
+                        font=("TkDefaultFont", 12, "bold")
+                    ).pack(anchor=tk.W, padx=10)
+                    
+                    ttk.Label(decision_tab, text="Bet Size:").pack(anchor=tk.W, pady=(10, 5))
+                    ttk.Label(
+                        decision_tab, 
+                        text=f"{result['decision']['bet_size_percentage'] * 100:.1f}% of pot",
+                        font=("TkDefaultFont", 12, "bold")
+                    ).pack(anchor=tk.W, padx=10)
+                    
+                    # Close button
+                    ttk.Button(
+                        result_window, 
+                        text="Close",
+                        command=result_window.destroy
+                    ).pack(pady=10)
+                    
+                except Exception as e:
+                    # Close progress window if still open
+                    if progress_window.winfo_exists():
+                        progress_window.destroy()
+                    
+                    logger.error(f"Error analyzing screenshot: {str(e)}", exc_info=True)
+                    messagebox.showerror("Error", f"Failed to analyze screenshot: {str(e)}")
+            
+            # Start the analysis thread
+            threading.Thread(target=analysis_thread, daemon=True).start()
+        except Exception as e:
+            logger.error(f"Error preparing screenshot analysis: {str(e)}", exc_info=True)
+            messagebox.showerror("Error", f"Failed to prepare screenshot analysis: {str(e)}")
+            self.status_var.set(f"Error preparing screenshot analysis: {str(e)}")
     
     def _show_help(self):
         """Show help information"""
         help_text = """
-        Poker Screen Grabber Help (PyTorch Edition)
+        Poker Computer Vision Assistant
         
-        This application captures and analyzes poker game screenshots to provide decision assistance.
+        This application allows you to analyze poker games using computer vision and machine learning.
         
         Getting Started:
         1. Select a poker game window from the dropdown
         2. Click "Select" to confirm the window
-        3. Click "Preview Window" to check what will be captured
+        3. Click "Preview Window" to check that detection works
         4. Set the capture interval (in seconds)
-        5. Click "Start Capture" to begin analysis
+        5. Click "Start Assistant" to begin analysis
         
         The application will:
         - Take periodic screenshots of the selected poker game
-        - Analyze the game state (cards, chips, etc.)
-        - Provide recommended actions based on PyTorch neural network analysis
+        - Analyze the screenshots to identify cards, chips, etc.
+        - Use a neural network to make optimal poker decisions
+        - Display the recommended actions
         
-        If auto-play is enabled, the application can automatically perform the recommended actions.
+        If auto-play is enabled, the assistant can automatically take actions in the game.
         
-        This version uses PyTorch for neural network operations instead of TensorFlow.
-        
-        For more information, please refer to the documentation.
+        For more information, see the documentation.
         """
         
         help_window = tk.Toplevel(self.root)
-        help_window.title("Help - PyTorch Edition")
-        help_window.geometry("600x400")
+        help_window.title("Help")
+        help_window.geometry("600x500")
         help_window.transient(self.root)
         
-        text_widget = tk.Text(help_window, wrap=tk.WORD, padx=10, pady=10)
+        # Create scrollable text area
+        text_frame = ttk.Frame(help_window)
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        scrollbar = ttk.Scrollbar(text_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        text_widget = tk.Text(text_frame, wrap=tk.WORD, yscrollcommand=scrollbar.set)
         text_widget.pack(fill=tk.BOTH, expand=True)
+        scrollbar.config(command=text_widget.yview)
+        
         text_widget.insert(tk.END, help_text)
         text_widget.config(state=tk.DISABLED)
+        
+        # Close button
+        ttk.Button(help_window, text="Close", command=help_window.destroy).pack(pady=10)
     
     def _show_about(self):
         """Show about information"""
         about_text = """
-        Poker Screen Grabber (PyTorch Edition)
-        Version 1.0.0
+        Poker Computer Vision Assistant
+        Version 2.0.0
         
-        A Python application that uses computer vision and PyTorch neural networks
+        A Python application that uses computer vision and neural networks
         to analyze poker games and provide decision assistance.
         
-        Created for learning and demonstration purposes.
-        
-        Libraries used:
-        - OpenCV for image processing
-        - PyTorch for neural network analysis
-        - Tkinter for the user interface
+        Key technologies:
+        • OpenCV for image processing and card detection
+        • PyTorch for neural network decision making
+        • Tkinter for the user interface
         
         © 2025
         """
         
-        messagebox.showinfo("About - PyTorch Edition", about_text)
+        messagebox.showinfo("About", about_text)
     
     def _on_exit(self):
-        """Handle application exit"""
-        if self.poker_assistant and self.poker_assistant.running:
-            result = messagebox.askyesno(
-                "Exit",
-                "Poker Assistant is still running. Stop it and exit?"
-            )
+        """Handle application exit with proper cleanup"""
+        try:
+            # Check if the assistant is running
+            if hasattr(self, 'poker_assistant') and self.poker_assistant and hasattr(self.poker_assistant, 'running') and self.poker_assistant.running:
+                result = messagebox.askyesno(
+                    "Exit",
+                    "Poker Assistant is still running. Stop it and exit?"
+                )
+                
+                if result:
+                    self._stop_assistant()
+                else:
+                    return  # Don't exit
             
-            if result:
-                self._stop_assistant()
-                self.root.destroy()
-        else:
+            # Cancel any scheduled updates
+            if self.status_update_id:
+                self.root.after_cancel(self.status_update_id)
+            
+            # Destroy the root window
+            self.root.destroy()
+        except Exception as e:
+            logger.error(f"Error during exit: {str(e)}", exc_info=True)
+            # Force exit
             self.root.destroy()
 
-    def _preview_selected_window(self):
-        """Preview the selected window with debugging overlay"""
-        if not self.selected_window_info:
-            self.status_var.set("No window selected for preview")
-            return
-        
-        # Use the window detector to capture a screenshot
-        self.window_detector.select_window(self.selected_window_info)
-        img = self.window_detector.capture_screenshot()  # This will now include the debugging overlay
-        
-        if img is not None:
-            # Update preview
-            self._update_preview(img)
-            self.status_var.set(f"Previewing window with debugging overlay: {self.selected_window_info.title}")
-        else:
-            self.status_var.set("Failed to capture window preview")
 
-    def _show_region_settings(self):
-        """Show settings dialog for region configuration"""
-        region_window = tk.Toplevel(self.root)
-        region_window.title("Region Configuration")
-        region_window.geometry("800x2000+1300+100")
-        region_window.transient(self.root)
-        region_window.grab_set()
-        
-        # Create main frame with scrollbar
-        main_frame = ttk.Frame(region_window)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Create canvas with scrollbar for the content
-        canvas = tk.Canvas(main_frame)
-        scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-        
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-        
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
-        # Dictionary to store all StringVars for later retrieval
-        region_vars = {}
-        
-        # Add labels for the columns
-        ttk.Label(scrollable_frame, text="Region Type").grid(row=0, column=0, padx=5, pady=5)
-        ttk.Label(scrollable_frame, text="Index/ID").grid(row=0, column=1, padx=5, pady=5)
-        ttk.Label(scrollable_frame, text="X").grid(row=0, column=2, padx=5, pady=5)
-        ttk.Label(scrollable_frame, text="Y").grid(row=0, column=3, padx=5, pady=5)
-        ttk.Label(scrollable_frame, text="Width").grid(row=0, column=4, padx=5, pady=5)
-        ttk.Label(scrollable_frame, text="Height").grid(row=0, column=5, padx=5, pady=5)
-        
-        # Create separator
-        ttk.Separator(scrollable_frame, orient="horizontal").grid(
-            row=1, column=0, columnspan=6, sticky=(tk.W, tk.E), pady=5)
-        
-        # Access the regions from the window detector
-        if hasattr(self, 'window_detector') and hasattr(self.window_detector, 'roi'):
-            roi = self.window_detector.roi
-        else:
-            messagebox.showerror("Error", "Window detector not initialized or missing ROI data")
-            region_window.destroy()
-            return
-        
-        # Row counter for grid layout
-        row = 2
-        
-        # Ensure all expected ROI types exist
-        required_roi_types = [
-            'community_cards', 'player_cards', 'player_chips', 
-            'main_player_chips', 'current_bets', 'game_stage', 
-            'pot', 'actions'
-        ]
-        
-        # Create any missing ROI types with default values
-        for roi_type in required_roi_types:
-            if roi_type not in roi:
-                if roi_type == 'main_player_chips':
-                    roi[roi_type] = [(280, 392, 100, 25)]
-                elif roi_type == 'game_stage':
-                    roi[roi_type] = [(265, 197, 80, 25), (720, 197, 80, 25)]
-                elif roi_type == 'current_bets':
-                    roi[roi_type] = {}
-                    for player_id in range(1, 10):
-                        roi[roi_type][player_id] = [(280 + (player_id * 10), 350, 70, 20)]
-                elif roi_type == 'actions':
-                    roi[roi_type] = {
-                        'raise': [(510, 480, 80, 20)],
-                        'call': [(510, 530, 80, 20)],
-                        'fold': [(510, 580, 80, 20)]
-                    }
-        
-        # Process each region type in a specific order
-        for region_type in required_roi_types:
-            # Header for region type
-            ttk.Label(
-                scrollable_frame, 
-                text=region_type.replace('_', ' ').title(),
-                font=("TkDefaultFont", 10, "bold")
-            ).grid(row=row, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
-            row += 1
-            
-            # Create separator after header
-            ttk.Separator(scrollable_frame, orient="horizontal").grid(
-                row=row, column=0, columnspan=6, sticky=(tk.W, tk.E))
-            row += 1
-            
-            # Process regions based on their structure
-            if region_type in ['player_cards', 'player_chips', 'current_bets']:
-                # These are dictionaries of lists
-                for player_id in sorted(roi[region_type].keys()):
-                    regions = roi[region_type][player_id]
-                    for i, region in enumerate(regions):
-                        # Region type display
-                        ttk.Label(scrollable_frame, text=region_type.replace('_', ' ')).grid(
-                            row=row, column=0, padx=5, pady=2, sticky=tk.W)
-                        
-                        # Player and index
-                        ttk.Label(scrollable_frame, text=f"P{player_id}-{i}").grid(
-                            row=row, column=1, padx=5, pady=2)
-                        
-                        # X, Y, W, H inputs
-                        x_var = tk.StringVar(value=str(region[0]))
-                        y_var = tk.StringVar(value=str(region[1]))
-                        w_var = tk.StringVar(value=str(region[2]))
-                        h_var = tk.StringVar(value=str(region[3]))
-                        
-                        ttk.Entry(scrollable_frame, textvariable=x_var, width=6).grid(
-                            row=row, column=2, padx=5, pady=2)
-                        ttk.Entry(scrollable_frame, textvariable=y_var, width=6).grid(
-                            row=row, column=3, padx=5, pady=2)
-                        ttk.Entry(scrollable_frame, textvariable=w_var, width=6).grid(
-                            row=row, column=4, padx=5, pady=2)
-                        ttk.Entry(scrollable_frame, textvariable=h_var, width=6).grid(
-                            row=row, column=5, padx=5, pady=2)
-                        
-                        # Store variables for later retrieval
-                        region_vars[(region_type, player_id, i)] = (x_var, y_var, w_var, h_var)
-                        
-                        row += 1
-            elif region_type == 'actions':
-                # Handle action buttons specially
-                for action_name in sorted(roi[region_type].keys()):
-                    regions = roi[region_type][action_name]
-                    for i, region in enumerate(regions):
-                        # Region type display
-                        ttk.Label(scrollable_frame, text=region_type).grid(
-                            row=row, column=0, padx=5, pady=2, sticky=tk.W)
-                        
-                        # Action name and index
-                        ttk.Label(scrollable_frame, text=f"{action_name}-{i}").grid(
-                            row=row, column=1, padx=5, pady=2)
-                        
-                        # X, Y, W, H inputs
-                        x_var = tk.StringVar(value=str(region[0]))
-                        y_var = tk.StringVar(value=str(region[1]))
-                        w_var = tk.StringVar(value=str(region[2]))
-                        h_var = tk.StringVar(value=str(region[3]))
-                        
-                        ttk.Entry(scrollable_frame, textvariable=x_var, width=6).grid(
-                            row=row, column=2, padx=5, pady=2)
-                        ttk.Entry(scrollable_frame, textvariable=y_var, width=6).grid(
-                            row=row, column=3, padx=5, pady=2)
-                        ttk.Entry(scrollable_frame, textvariable=w_var, width=6).grid(
-                            row=row, column=4, padx=5, pady=2)
-                        ttk.Entry(scrollable_frame, textvariable=h_var, width=6).grid(
-                            row=row, column=5, padx=5, pady=2)
-                        
-                        # Store variables for later retrieval - using action name instead of player_id
-                        region_vars[(region_type, action_name, i)] = (x_var, y_var, w_var, h_var)
-                        
-                        row += 1
-            else:
-                # These are lists of tuples
-                for i, region in enumerate(roi[region_type]):
-                    # Region type display
-                    ttk.Label(scrollable_frame, text=region_type.replace('_', ' ')).grid(
-                        row=row, column=0, padx=5, pady=2, sticky=tk.W)
-                    
-                    # Index
-                    ttk.Label(scrollable_frame, text=str(i)).grid(
-                        row=row, column=1, padx=5, pady=2)
-                    
-                    # X, Y, W, H inputs
-                    x_var = tk.StringVar(value=str(region[0]))
-                    y_var = tk.StringVar(value=str(region[1]))
-                    w_var = tk.StringVar(value=str(region[2]))
-                    h_var = tk.StringVar(value=str(region[3]))
-                    
-                    ttk.Entry(scrollable_frame, textvariable=x_var, width=6).grid(
-                        row=row, column=2, padx=5, pady=2)
-                    ttk.Entry(scrollable_frame, textvariable=y_var, width=6).grid(
-                        row=row, column=3, padx=5, pady=2)
-                    ttk.Entry(scrollable_frame, textvariable=w_var, width=6).grid(
-                        row=row, column=4, padx=5, pady=2)
-                    ttk.Entry(scrollable_frame, textvariable=h_var, width=6).grid(
-                        row=row, column=5, padx=5, pady=2)
-                    
-                    # Store variables for later retrieval
-                    region_vars[(region_type, None, i)] = (x_var, y_var, w_var, h_var)
-                    
-                    row += 1
-        
-        # Add extra controls for adding new regions
-        ttk.Separator(scrollable_frame, orient="horizontal").grid(
-            row=row, column=0, columnspan=6, sticky=(tk.W, tk.E), pady=10)
-        row += 1
-        
-        ttk.Label(
-            scrollable_frame, 
-            text="Add New Region",
-            font=("TkDefaultFont", 10, "bold")
-        ).grid(row=row, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
-        row += 1
-        
-        # Type selection
-        ttk.Label(scrollable_frame, text="Region Type:").grid(
-            row=row, column=0, padx=5, pady=2, sticky=tk.W)
-        
-        new_region_type_var = tk.StringVar()
-        region_type_combo = ttk.Combobox(
-            scrollable_frame, 
-            textvariable=new_region_type_var,
-            values=required_roi_types,
-            state="readonly",
-            width=15
-        )
-        region_type_combo.grid(row=row, column=1, columnspan=2, padx=5, pady=2, sticky=tk.W)
-        
-        # Index/ID field
-        ttk.Label(scrollable_frame, text="Index/ID:").grid(
-            row=row, column=3, padx=5, pady=2, sticky=tk.W)
-        
-        new_index_var = tk.StringVar(value="0")
-        ttk.Entry(scrollable_frame, textvariable=new_index_var, width=6).grid(
-            row=row, column=4, padx=5, pady=2)
-        
-        row += 1
-        
-        # Coordinates
-        ttk.Label(scrollable_frame, text="X:").grid(
-            row=row, column=0, padx=5, pady=2, sticky=tk.W)
-        new_x_var = tk.StringVar(value="0")
-        ttk.Entry(scrollable_frame, textvariable=new_x_var, width=6).grid(
-            row=row, column=1, padx=5, pady=2)
-        
-        ttk.Label(scrollable_frame, text="Y:").grid(
-            row=row, column=2, padx=5, pady=2, sticky=tk.W)
-        new_y_var = tk.StringVar(value="0")
-        ttk.Entry(scrollable_frame, textvariable=new_y_var, width=6).grid(
-            row=row, column=3, padx=5, pady=2)
-        
-        ttk.Label(scrollable_frame, text="W:").grid(
-            row=row, column=4, padx=5, pady=2, sticky=tk.W)
-        new_w_var = tk.StringVar(value="50")
-        ttk.Entry(scrollable_frame, textvariable=new_w_var, width=6).grid(
-            row=row, column=5, padx=5, pady=2)
-        
-        row += 1
-        
-        ttk.Label(scrollable_frame, text="H:").grid(
-            row=row, column=0, padx=5, pady=2, sticky=tk.W)
-        new_h_var = tk.StringVar(value="20")
-        ttk.Entry(scrollable_frame, textvariable=new_h_var, width=6).grid(
-            row=row, column=1, padx=5, pady=2)
-        
-        # Add button
-        ttk.Button(
-            scrollable_frame, 
-            text="Add Region", 
-            command=lambda: self._add_new_region(
-                new_region_type_var.get(),
-                new_index_var.get(),
-                new_x_var.get(),
-                new_y_var.get(),
-                new_w_var.get(),
-                new_h_var.get(),
-                region_window
-            )
-        ).grid(row=row, column=2, columnspan=2, padx=5, pady=2)
-        
-        row += 1
-        
-        # Add action buttons
-        if hasattr(self, 'selected_window_info') and self.window_detector.selected_window:
-            ttk.Label(
-                scrollable_frame, 
-                text=f"Currently calibrating regions for: {self.window_detector.selected_window}",
-                font=("TkDefaultFont", 9, "italic")
-            ).grid(row=row, column=0, columnspan=6, pady=(15, 5))
-            row += 1
-        
-        button_frame = ttk.Frame(scrollable_frame)
-        button_frame.grid(row=row, column=0, columnspan=6, pady=20)
-        
-        # Preview button - shows current regions on live image
-        preview_btn = ttk.Button(
-            button_frame, 
-            text="Preview Regions", 
-            command=lambda: self._preview_regions(region_vars)
-        )
-        preview_btn.pack(side=tk.LEFT, padx=5)
-        
-        # Save button
-        save_btn = ttk.Button(
-            button_frame, 
-            text="Save Regions", 
-            command=lambda: self._save_regions(region_vars, region_window)
-        )
-        save_btn.pack(side=tk.LEFT, padx=5)
-        
-        # Reset to defaults button
-        reset_btn = ttk.Button(
-            button_frame, 
-            text="Reset to Defaults", 
-            command=lambda: self._reset_regions(region_window)
-        )
-        reset_btn.pack(side=tk.LEFT, padx=5)
-        
-        # Cancel button
-        cancel_btn = ttk.Button(
-            button_frame, 
-            text="Cancel", 
-            command=region_window.destroy
-        )
-        cancel_btn.pack(side=tk.LEFT, padx=5)
-
-    def _add_new_region(self, region_type, index_str, x_str, y_str, w_str, h_str, window):
-        """Add a new region to the ROI configuration"""
-        try:
-            # Convert inputs to appropriate types
-            x = int(x_str)
-            y = int(y_str)
-            w = int(w_str)
-            h = int(h_str)
-            
-            # Handle different region types
-            if region_type in ['player_cards', 'player_chips', 'current_bets']:
-                # These are dictionaries of lists - index_str is player_id
-                try:
-                    player_id = int(index_str)
-                    if player_id < 1 or player_id > 9:
-                        raise ValueError("Player ID must be between 1 and 9")
-                    
-                    # Initialize the key if it doesn't exist
-                    if player_id not in self.window_detector.roi[region_type]:
-                        self.window_detector.roi[region_type][player_id] = []
-                    
-                    # Add the new region
-                    self.window_detector.roi[region_type][player_id].append((x, y, w, h))
-                    
-                except ValueError:
-                    messagebox.showerror("Error", "Invalid player ID. Must be a number between 1 and 9.")
-                    return
-            
-            elif region_type == 'actions':
-                # Action buttons - index_str is action name
-                action_name = index_str.lower()
-                if not action_name:
-                    messagebox.showerror("Error", "Action name cannot be empty")
-                    return
-                
-                # Initialize the key if it doesn't exist
-                if action_name not in self.window_detector.roi[region_type]:
-                    self.window_detector.roi[region_type][action_name] = []
-                
-                # Add the new region
-                self.window_detector.roi[region_type][action_name].append((x, y, w, h))
-            
-            else:
-                # Simple list of regions
-                self.window_detector.roi[region_type].append((x, y, w, h))
-            
-            # Ask if user wants to save changes
-            result = messagebox.askyesno(
-                "Save Changes", 
-                "Region added successfully. Would you like to save changes to file now?",
-                icon=messagebox.QUESTION
-            )
-            
-            if result:
-                # Save the updated ROI to file
-                success = self.window_detector.save_regions_to_file("roi_config.json")
-                
-                # Sync with poker assistant if it exists
-                if hasattr(self, 'poker_assistant') and self.poker_assistant:
-                    if hasattr(self.poker_assistant, 'screen_grabber') and hasattr(self.poker_assistant.screen_grabber, 'roi'):
-                        # Make a deep copy to prevent shared references
-                        self.poker_assistant.screen_grabber.roi = copy.deepcopy(self.window_detector.roi)
-                        logger.info("ROI configuration synced with poker assistant")
-                
-                if success:
-                    messagebox.showinfo("Success", "ROI configuration saved successfully")
-                else:
-                    messagebox.showerror("Error", "Failed to save ROI configuration")
-            
-            # Refresh the window with updated regions
-            window.destroy()
-            self._show_region_settings()
-            
-        except ValueError as e:
-            messagebox.showerror("Error", f"Invalid input: {str(e)}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to add region: {str(e)}")
-            logger.error(f"Error in _add_new_region: {str(e)}", exc_info=True)
-
-    def _preview_regions(self, region_vars):
-        """Preview regions with current settings"""
-        # Create a temporary copy of the ROI with the current settings
-        temp_roi = self._get_updated_roi_from_vars(region_vars)
-        
-        # Store the original ROI
-        original_roi = self.window_detector.roi
-        
-        # Temporarily set the ROI to the new values
-        self.window_detector.roi = temp_roi
-        
-        # Capture a screenshot with the debug overlay
-        self.window_detector.show_debug_overlay = True
-        screenshot = self.window_detector.capture_screenshot()
-        
-        # Restore the original ROI
-        self.window_detector.roi = original_roi
-        
-        # Display the preview
-        if screenshot is not None:
-            # Create a preview window
-            preview_window = tk.Toplevel(self.root)
-            preview_window.title("Region Preview")
-            preview_window.geometry("1024x768")
-            
-            # Convert image for tkinter
-            img = cv2.cvtColor(screenshot, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(img)
-            
-            # Resize to fit window
-            img.thumbnail((1000, 700))
-            
-            # Convert to PhotoImage
-            img_tk = ImageTk.PhotoImage(image=img)
-            
-            # Create label and display image
-            label = ttk.Label(preview_window, image=img_tk)
-            label.image = img_tk  # Keep a reference
-            label.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-            
-            # Add close button
-            ttk.Button(
-                preview_window, 
-                text="Close Preview", 
-                command=preview_window.destroy
-            ).pack(pady=10)
-        else:
-            messagebox.showerror("Error", "Failed to capture preview image")
-
-    def _save_regions(self, region_vars, window):
-        """Save the updated regions"""
-        try:
-            # Update ROI with values from the UI
-            updated_roi = self._get_updated_roi_from_vars(region_vars)
-            
-            # Update the window detector's ROI
-            self.window_detector.roi = updated_roi
-            
-            # Save to a file using the established method
-            roi_file = "roi_config.json"
-            success = self.window_detector.save_regions_to_file(roi_file)
-            
-            if not success:
-                messagebox.showerror("Error", "Failed to save ROI configuration to file.")
-                return
-            
-            # Sync with poker assistant if it exists
-            if hasattr(self, 'poker_assistant') and self.poker_assistant:
-                if hasattr(self.poker_assistant, 'screen_grabber') and hasattr(self.poker_assistant.screen_grabber, 'roi'):
-                    # Make a deep copy to prevent shared references
-                    self.poker_assistant.screen_grabber.roi = copy.deepcopy(updated_roi)
-                    logger.info("ROI configuration synced with poker assistant")
-            
-            # Show success message
-            messagebox.showinfo("Success", f"Regions saved to {roi_file}")
-            
-            # Close the window
-            window.destroy()
-        
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to save regions: {str(e)}")
-            logger.error(f"Error in _save_regions: {str(e)}", exc_info=True)
-
-    def _get_updated_roi_from_vars(self, region_vars):
-        """Get updated ROI dictionary from UI variables"""
-        # Start with a deep copy of the current ROI
-        updated_roi = copy.deepcopy(self.window_detector.roi)
-        
-        # Update with values from the UI
-        for (region_type, identifier, index), (x_var, y_var, w_var, h_var) in region_vars.items():
-            try:
-                x = int(x_var.get())
-                y = int(y_var.get())
-                w = int(w_var.get())
-                h = int(h_var.get())
-                
-                if region_type in ['player_cards', 'player_chips', 'current_bets']:
-                    # These are player-specific regions
-                    if identifier is not None:
-                        player_id = identifier
-                        if player_id in updated_roi[region_type] and index < len(updated_roi[region_type][player_id]):
-                            updated_roi[region_type][player_id][index] = (x, y, w, h)
-                
-                elif region_type == 'actions':
-                    # Action buttons - identifier is action name
-                    action_name = identifier
-                    if action_name in updated_roi[region_type] and index < len(updated_roi[region_type][action_name]):
-                        updated_roi[region_type][action_name][index] = (x, y, w, h)
-                
-                else:
-                    # This is a general region
-                    if index < len(updated_roi[region_type]):
-                        updated_roi[region_type][index] = (x, y, w, h)
-            
-            except (ValueError, KeyError, IndexError) as e:
-                logger.error(f"Error updating region {region_type}-{identifier}-{index}: {str(e)}")
-        
-        return updated_roi
-
-    def _reset_regions(self, window):
-        """Reset regions to default values"""
-        result = messagebox.askyesno(
-            "Confirm Reset", 
-            "Are you sure you want to reset all regions to default values? This cannot be undone."
-        )
-        
-        if result:
-            # Reset to default ROI
-            self.window_detector.roi = self.window_detector._get_default_roi()
-            
-            # Close the window
-            window.destroy()
-            
-            # Open a new window with the default values
-            self._show_region_settings()
-
-    def run(self):
-        """Run the application"""
-        self.root.protocol("WM_DELETE_WINDOW", self._on_exit)
-        self.root.mainloop()
-
-
-if __name__ == "__main__":
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Poker Screen Grabber (PyTorch Edition)")
+def main():
+    """Main entry point"""
+    parser = argparse.ArgumentParser(description="Poker Computer Vision Assistant")
     parser.add_argument("--config", help="Path to configuration file")
+    parser.add_argument("--window", help="Title of the window to capture (partial match)")
+    
     args = parser.parse_args()
     
     # Create and run the application
     root = tk.Tk()
-    app = PokerScreenGrabberApp(root)
+    app = PokerApplication(root, config_file=args.config)
     
-    # Load configuration if specified
-    if args.config:
-        # This would be implemented to load the config
-        pass
+    # Try to select window if specified
+    if args.window and hasattr(app, 'window_detector'):
+        # Get window list
+        windows = app.window_detector.get_window_list()
+        
+        # Find matching windows
+        matching_windows = [w for w in windows if args.window.lower() in w.title.lower()]
+        
+        if matching_windows:
+            # Select the first matching window
+            app.selected_window_info = matching_windows[0]
+            app.window_detector.select_window(app.selected_window_info)
+            
+            # Update UI
+            app.selected_window_var.set(app.selected_window_info.title)
+            app.window_handle_var.set(str(app.selected_window_info.handle))
+            
+            if app.selected_window_info.rect:
+                rect_str = f"({app.selected_window_info.rect[0]}, {app.selected_window_info.rect[1]}, " \
+                        f"{app.selected_window_info.rect[2]}, {app.selected_window_info.rect[3]})"
+                app.window_rect_var.set(rect_str)
+            
+            app.status_var.set(f"Selected window: {app.selected_window_info.title}")
+            
+            # Preview the window
+            app._preview_selected_window()
     
-    app.run()
+    # Start the application main loop
+    app.root.protocol("WM_DELETE_WINDOW", app._on_exit)
+    app.root.mainloop()
+
+if __name__ == "__main__":
+    main()
