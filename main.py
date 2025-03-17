@@ -49,7 +49,7 @@ class PokerScreenGrabberApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Poker Screen Grabber (PyTorch)")
-        self.root.geometry("1024x768")
+        self.root.geometry("1300x768+1080+800")
         self.root.minsize(800, 600)
         
         # Initialize window selection attributes
@@ -59,13 +59,36 @@ class PokerScreenGrabberApp:
         # Create screen grabber for window detection
         self.window_detector = PokerScreenGrabber(capture_interval=1.0, output_dir="poker_data/screenshots")
         
+        # Load ROI configuration - modified to be more robust
         roi_file = "roi_config.json"
         if os.path.exists(roi_file):
-            self.window_detector.load_regions_from_file(roi_file)
+            try:
+                # Attempt to load from file
+                success = self.window_detector.load_regions_from_file(roi_file)
+                if not success:
+                    # Show error notification
+                    messagebox.showwarning(
+                        "ROI Configuration Warning", 
+                        f"Could not load ROI configuration from {roi_file}.\n\n"
+                        "Using default values. You can recalibrate once you select a window."
+                    )
+                    # Since loading failed, we'll explicitly use defaults
+                    self.window_detector.roi = self.window_detector._get_default_roi()
+            except Exception as e:
+                # Extra exception handling
+                logger.error(f"Error loading ROI configuration: {str(e)}", exc_info=True)
+                messagebox.showwarning(
+                    "ROI Configuration Error", 
+                    f"Error loading ROI configuration: {str(e)}.\n\n"
+                    "Using default values. You can recalibrate once you select a window."
+                )
+                # Use defaults
+                self.window_detector.roi = self.window_detector._get_default_roi()
         else:
-            # Create default ROI config
+            # File doesn't exist, use defaults - let the user know
+            logger.info("No ROI configuration file found. Using default values.")
             self.window_detector.roi = self.window_detector._get_default_roi()
-
+        
         # Initialize components
         self.poker_assistant = None
         self.config = self._load_default_config()
@@ -140,7 +163,63 @@ class PokerScreenGrabberApp:
         menu_bar.add_cascade(label="Help", menu=help_menu)
         
         self.root.config(menu=menu_bar)
-    
+
+    def _recalibrate_roi(self):
+        """Explicitly recalibrate ROI from the current window"""
+        if not self.selected_window_info:
+            messagebox.showwarning("Warning", "No window selected. Please select a window first.")
+            return
+        
+        # Confirm with user
+        result = messagebox.askyesno(
+            "Recalibrate ROI",
+            "This will recalibrate regions of interest based on the current window, " +
+            "overwriting any customizations. Continue?",
+            icon=messagebox.WARNING
+        )
+        
+        if not result:
+            return
+        
+        # Take a screenshot
+        screenshot = self.window_detector.capture_screenshot()
+        
+        if screenshot is not None:
+            # Log screenshot dimensions
+            logger.info(f"Screenshot dimensions for calibration: {screenshot.shape}")
+            
+            # Before calibration, save the current screenshot with overlay
+            debug_dir = "debug_calibration"
+            os.makedirs(debug_dir, exist_ok=True)
+            timestamp = int(time.time())
+            
+            # Save pre-calibration screenshot with current ROI overlay
+            pre_overlay = self.window_detector.add_debugging_overlay(screenshot)
+            pre_path = f"{debug_dir}/pre_calibration_{timestamp}.png"
+            cv2.imwrite(pre_path, pre_overlay)
+            
+            # Force recalibration with the current screenshot dimensions
+            success = self.window_detector.calibrate_roi_from_screenshot(screenshot, force_calibrate=True)
+            
+            if success:
+                # Save post-calibration screenshot with new ROI overlay
+                post_screenshot = self.window_detector.capture_screenshot()
+                post_overlay = self.window_detector.add_debugging_overlay(post_screenshot)
+                post_path = f"{debug_dir}/post_calibration_{timestamp}.png"
+                cv2.imwrite(post_path, post_overlay)
+                
+                messagebox.showinfo("Success", "ROI successfully recalibrated. Debug images saved to the 'debug_calibration' folder.")
+                
+                # Sync with poker assistant if it exists
+                if hasattr(self, 'poker_assistant') and self.poker_assistant:
+                    if hasattr(self.poker_assistant, 'screen_grabber') and hasattr(self.poker_assistant.screen_grabber, 'roi'):
+                        self.poker_assistant.screen_grabber.roi = copy.deepcopy(self.window_detector.roi)
+                        logger.info("ROI configuration synced with poker assistant")
+            else:
+                messagebox.showerror("Error", "Failed to recalibrate ROI.")
+        else:
+            messagebox.showerror("Error", "Failed to capture screenshot for calibration.")
+
     def _create_main_frame(self):
         """Create the main application frame"""
         main_frame = ttk.Frame(self.root, padding="10")
@@ -193,6 +272,17 @@ class PokerScreenGrabberApp:
             font=("TkDefaultFont", 10, "bold")
         ).grid(row=2, column=2, columnspan=2, sticky=tk.E, pady=5)
         
+        # Create a frame for the region configuration buttons
+        roi_frame = ttk.Frame(control_frame)
+        roi_frame.grid(row=2, column=4, padx=5, pady=5)
+        
+        # Edit ROI configuration button
+        edit_roi_btn = ttk.Button(roi_frame, text="Edit Regions", command=self._show_region_settings)
+        edit_roi_btn.pack(side=tk.LEFT, padx=2)
+        
+        # Recalibrate ROI button (new button to explicitly control recalibration)
+        recalibrate_roi_btn = ttk.Button(roi_frame, text="Recalibrate", command=self._recalibrate_roi)
+        recalibrate_roi_btn.pack(side=tk.LEFT, padx=2)
         # Content panes (using PanedWindow for resizable sections)
         content_paned = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
         content_paned.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -374,9 +464,46 @@ class PokerScreenGrabberApp:
             # Also update the window detector's selection
             if self.window_detector:
                 success = self.window_detector.select_window(self.selected_window_info)
-                if success:
-                    self.status_var.set(f"Selected window: {self.selected_window_info.title}")
+                
+                # Check if ROI config exists
+                roi_file = "roi_config.json"
+                if os.path.exists(roi_file):
+                    # Ask user if they want to auto-calibrate or keep existing configuration
+                    result = messagebox.askyesno(
+                        "ROI Configuration", 
+                        "An existing ROI configuration was found. Would you like to auto-calibrate ROI for the new window?\n\n"
+                        "Selecting 'No' will keep the existing ROI configuration.",
+                        icon=messagebox.QUESTION
+                    )
+                    
+                    if result:
+                        # User wants to calibrate
+                        self._preview_selected_window()
+                        calibrate_success = self.window_detector.calibrate_roi_from_screenshot()
+                        if calibrate_success:
+                            self.status_var.set(f"Selected window: {self.selected_window_info.title} (ROI calibrated)")
+                            # Save the new ROI
+                            self.window_detector.save_regions_to_file(roi_file)
+                            
+                            # Sync with poker assistant if it exists
+                            if hasattr(self, 'poker_assistant') and self.poker_assistant:
+                                if hasattr(self.poker_assistant, 'screen_grabber') and hasattr(self.poker_assistant.screen_grabber, 'roi'):
+                                    self.poker_assistant.screen_grabber.roi = copy.deepcopy(self.window_detector.roi)
+                        else:
+                            self.status_var.set(f"Selected window: {self.selected_window_info.title} (ROI calibration failed)")
+                    else:
+                        # User wants to keep existing ROI
+                        self.status_var.set(f"Selected window: {self.selected_window_info.title} (using existing ROI)")
+                        # Just to be safe, let's reload ROI from file
+                        self.window_detector.load_regions_from_file(roi_file)
                 else:
+                    # No existing ROI, calibrate automatically
+                    self._preview_selected_window()
+                    self.window_detector.calibrate_roi_from_screenshot()
+                    self.window_detector.save_regions_to_file(roi_file)
+                    self.status_var.set(f"Selected window: {self.selected_window_info.title} (ROI calibrated)")
+                
+                if not success:
                     self.status_var.set(f"Error selecting window: {self.selected_window_info.title}")
             else:
                 self.status_var.set(f"Selected window: {self.selected_window_info.title}")
@@ -385,6 +512,7 @@ class PokerScreenGrabberApp:
             self._preview_selected_window()
         else:
             self.status_var.set(f"Window not found: {selected_title}")
+
 
     def _preview_selected_window(self):
         """Preview the selected window"""
@@ -449,7 +577,24 @@ class PokerScreenGrabberApp:
         except Exception as e:
             self.status_var.set(f"Error updating screenshot display: {str(e)}")
             return False
-    
+
+    def _sync_roi_with_components(self):
+        """Synchronize ROI configuration with all components that use it"""
+        try:
+            # Sync with poker assistant if it exists
+            if hasattr(self, 'poker_assistant') and self.poker_assistant:
+                if hasattr(self.poker_assistant, 'screen_grabber') and hasattr(self.poker_assistant.screen_grabber, 'roi'):
+                    # Make a deep copy to prevent shared references
+                    self.poker_assistant.screen_grabber.roi = copy.deepcopy(self.window_detector.roi)
+                    logger.info("ROI configuration synced with poker assistant")
+            
+            # You might have other components that need syncing here
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error syncing ROI with components: {str(e)}", exc_info=True)
+            return False
+
     def _start_assistant(self):
         """Start the poker assistant"""
         try:
@@ -644,7 +789,7 @@ class PokerScreenGrabberApp:
         """Show settings dialog"""
         settings_window = tk.Toplevel(self.root)
         settings_window.title("Settings - PyTorch")
-        settings_window.geometry("500x450")  # Slightly taller for PyTorch info
+        settings_window.geometry("800x1200+1080+800")  # Slightly taller for PyTorch info
         settings_window.transient(self.root)
         settings_window.grab_set()
         
@@ -970,7 +1115,7 @@ class PokerScreenGrabberApp:
         """Show settings dialog for region configuration"""
         region_window = tk.Toplevel(self.root)
         region_window.title("Region Configuration")
-        region_window.geometry("800x600")
+        region_window.geometry("800x2000+1300+100")
         region_window.transient(self.root)
         region_window.grab_set()
         
@@ -1326,6 +1471,29 @@ class PokerScreenGrabberApp:
                 # Simple list of regions
                 self.window_detector.roi[region_type].append((x, y, w, h))
             
+            # Ask if user wants to save changes
+            result = messagebox.askyesno(
+                "Save Changes", 
+                "Region added successfully. Would you like to save changes to file now?",
+                icon=messagebox.QUESTION
+            )
+            
+            if result:
+                # Save the updated ROI to file
+                success = self.window_detector.save_regions_to_file("roi_config.json")
+                
+                # Sync with poker assistant if it exists
+                if hasattr(self, 'poker_assistant') and self.poker_assistant:
+                    if hasattr(self.poker_assistant, 'screen_grabber') and hasattr(self.poker_assistant.screen_grabber, 'roi'):
+                        # Make a deep copy to prevent shared references
+                        self.poker_assistant.screen_grabber.roi = copy.deepcopy(self.window_detector.roi)
+                        logger.info("ROI configuration synced with poker assistant")
+                
+                if success:
+                    messagebox.showinfo("Success", "ROI configuration saved successfully")
+                else:
+                    messagebox.showerror("Error", "Failed to save ROI configuration")
+            
             # Refresh the window with updated regions
             window.destroy()
             self._show_region_settings()
@@ -1334,6 +1502,7 @@ class PokerScreenGrabberApp:
             messagebox.showerror("Error", f"Invalid input: {str(e)}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to add region: {str(e)}")
+            logger.error(f"Error in _add_new_region: {str(e)}", exc_info=True)
 
     def _preview_regions(self, region_vars):
         """Preview regions with current settings"""
@@ -1393,10 +1562,20 @@ class PokerScreenGrabberApp:
             # Update the window detector's ROI
             self.window_detector.roi = updated_roi
             
-            # Save to a file
+            # Save to a file using the established method
             roi_file = "roi_config.json"
-            with open(roi_file, 'w') as f:
-                json.dump(updated_roi, f, indent=2)
+            success = self.window_detector.save_regions_to_file(roi_file)
+            
+            if not success:
+                messagebox.showerror("Error", "Failed to save ROI configuration to file.")
+                return
+            
+            # Sync with poker assistant if it exists
+            if hasattr(self, 'poker_assistant') and self.poker_assistant:
+                if hasattr(self.poker_assistant, 'screen_grabber') and hasattr(self.poker_assistant.screen_grabber, 'roi'):
+                    # Make a deep copy to prevent shared references
+                    self.poker_assistant.screen_grabber.roi = copy.deepcopy(updated_roi)
+                    logger.info("ROI configuration synced with poker assistant")
             
             # Show success message
             messagebox.showinfo("Success", f"Regions saved to {roi_file}")
@@ -1406,6 +1585,7 @@ class PokerScreenGrabberApp:
         
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save regions: {str(e)}")
+            logger.error(f"Error in _save_regions: {str(e)}", exc_info=True)
 
     def _get_updated_roi_from_vars(self, region_vars):
         """Get updated ROI dictionary from UI variables"""

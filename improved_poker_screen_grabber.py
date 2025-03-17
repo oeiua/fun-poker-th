@@ -721,12 +721,11 @@ class PokerScreenGrabber:
         
         else:
             # Fallback - just use window titles without handles
-            windows.append(WindowInfo("PokerTH", None, (0, 0, 1024, 768)))
+            windows.append(WindowInfo("PokerTH", None, (0, 0, 1028, 647)))
             windows.append(WindowInfo("Other Window"))
         
         return windows
-
-
+    
     def select_window(self, window_info):
         """
         Select a window to capture
@@ -749,8 +748,10 @@ class PokerScreenGrabber:
                         self.window_rect = window.rect
                         logger.info(f"Selected window by title: {window.title}")
                         
-                        # DO NOT automatically calibrate ROI - this is the critical change
-                        # We want to preserve existing ROI configuration
+                        # Take a screenshot and calibrate ROI
+                        screenshot = self.capture_screenshot()
+                        if screenshot is not None:
+                            self.calibrate_roi_from_screenshot(screenshot)
                         
                         return True
                 
@@ -763,12 +764,10 @@ class PokerScreenGrabber:
                 self.window_rect = window_info.rect
                 logger.info(f"Selected window by object: {window_info.title}")
                 
-                # DO NOT automatically calibrate ROI
-                # The previous code had:
-                # screenshot = self.capture_screenshot()
-                # if screenshot is not None:
-                #     self.calibrate_roi_from_screenshot(screenshot)
-                # We remove this to preserve existing ROI configuration
+                # Take a screenshot and calibrate ROI
+                screenshot = self.capture_screenshot()
+                if screenshot is not None:
+                    self.calibrate_roi_from_screenshot(screenshot)
                 
                 return True
         except Exception as e:
@@ -777,7 +776,7 @@ class PokerScreenGrabber:
     
     def capture_window(self, hwnd=None, rect=None):
         """
-        Capture a specific window with improved accuracy
+        Capture a specific window
         
         Args:
             hwnd: Window handle (Windows only)
@@ -786,63 +785,34 @@ class PokerScreenGrabber:
         Returns:
             numpy.ndarray: Screenshot of the window or None on failure
         """
-        try:
-            logger.info(f"Capturing window with hwnd={hwnd}, rect={rect}")
-            
-            if WINDOWS_PLATFORM and hwnd:
-                try:
-                    # Get window dimensions - include border for more accurate capture
-                    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
-                    width = right - left
-                    height = bottom - top
-                    
-                    logger.info(f"Window dimensions: {width}x{height} at ({left},{top})")
-                    
-                    # Use pyautogui for reliable capture
-                    screenshot = pyautogui.screenshot(region=(left, top, width, height))
-                    img = np.array(screenshot)
-                    
-                    if img is not None and img.size > 0:
-                        # Convert from RGB to BGR for OpenCV
-                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                        logger.info(f"Successfully captured window: {img.shape}")
-                        return img
-                    else:
-                        logger.warning("Captured image is empty")
-                except Exception as e:
-                    logger.error(f"Error capturing window with handle: {str(e)}")
-            
-            # Fallback: Use direct region capture if rect is provided
-            if rect:
-                try:
-                    left, top, right, bottom = rect
-                    width = right - left
-                    height = bottom - top
-                    
-                    logger.info(f"Capturing region: {width}x{height} at ({left},{top})")
-                    
-                    # Use pyautogui for reliable capture
-                    screenshot = pyautogui.screenshot(region=(left, top, width, height))
-                    img = np.array(screenshot)
-                    
-                    if img is not None and img.size > 0:
-                        # Convert from RGB to BGR for OpenCV
-                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                        logger.info(f"Successfully captured region: {img.shape}")
-                        return img
-                    else:
-                        logger.warning("Captured region image is empty")
-                except Exception as e:
-                    logger.error(f"Error capturing region: {str(e)}")
-            
-            # If all capture methods fail, use mock screenshot as last resort
-            logger.warning("All capture methods failed, using mock screenshot")
-            return self.create_mock_screenshot()
-            
-        except Exception as e:
-            logger.error(f"Capture window exception: {str(e)}", exc_info=True)
-            logger.info("Falling back to mock screenshot due to error")
-            return self.create_mock_screenshot()
+        if WINDOWS_PLATFORM and hwnd:
+            try:
+                # Get window dimensions
+                left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+                width = right - left
+                height = bottom - top
+                
+                # Fallback to pyautogui if we can't use PrintWindow
+                screenshot = pyautogui.screenshot(region=(left, top, width, height))
+                return np.array(screenshot)
+            except Exception as e:
+                logger.error(f"Error capturing window: {str(e)}")
+        
+        # Fallback: Use pyautogui to capture the region
+        if rect:
+            try:
+                left, top, right, bottom = rect
+                width = right - left
+                height = bottom - top
+                
+                # Capture screen region
+                screenshot = pyautogui.screenshot(region=(left, top, width, height))
+                return np.array(screenshot)
+            except Exception as e:
+                logger.error(f"Error capturing region: {str(e)}")
+        
+        # Final fallback: Create a mock screenshot
+        return self.create_mock_screenshot()
     
     def capture_screenshot(self):
         """
@@ -921,58 +891,24 @@ class PokerScreenGrabber:
         except Exception as e:
             logger.error(f"Error saving screenshot: {str(e)}")
     
-    def calibrate_roi_from_screenshot(self, img=None, force_calibrate=False):
+    def calibrate_roi_from_screenshot(self, img=None):
         """
         Calibrate ROI from current screenshot
         
         Args:
             img: Screenshot to use for calibration, or None to capture new screenshot
-            force_calibrate: If True, calibrate even if ROI config exists
             
         Returns:
             bool: True if calibration was successful
         """
         try:
-            # Check if ROI configuration already exists
-            roi_file = "roi_config.json"
-            
-            if os.path.exists(roi_file) and not force_calibrate:
-                logger.info("ROI configuration file already exists. Skipping calibration.")
-                # Make sure existing configuration is loaded
-                if not self.load_regions_from_file(roi_file):
-                    logger.warning("Failed to load existing ROI configuration.")
-                return True
-            
-            # Proceed with calibration
             if img is None:
                 img = self.capture_screenshot()
-            
+                
             if img is not None:
-                logger.info(f"Calibrating ROI for image size: {img.shape}")
-                
-                # Get image dimensions
-                h, w = img.shape[:2]
-                
-                # For debugging, save the image being used for calibration
-                debug_dir = "debug_calibration"
-                os.makedirs(debug_dir, exist_ok=True)
-                timestamp = int(time.time())
-                calibration_img_path = f"{debug_dir}/calibration_source_{timestamp}.png"
-                cv2.imwrite(calibration_img_path, img)
-                
                 self.roi = self.roi_calibrator.calibrate_roi(img)
-                
-                # Save the calibrated regions
-                self.save_regions_to_file(roi_file)
-                
-                # Log the calibrated ROI
-                logger.info(f"ROI calibrated successfully for {w}x{h} image")
-                
-                # For debugging, save an overlay of the calibrated regions
-                overlay_img = self.add_debugging_overlay(img)
-                overlay_path = f"{debug_dir}/calibration_overlay_{timestamp}.png"
-                cv2.imwrite(overlay_path, overlay_img)
-                
+                self.save_regions_to_file("roi_config.json")
+                logger.info("ROI calibrated successfully")
                 return True
             else:
                 logger.warning("Failed to capture screenshot for ROI calibration")
@@ -980,7 +916,7 @@ class PokerScreenGrabber:
         except Exception as e:
             logger.error(f"Error calibrating ROI: {str(e)}", exc_info=True)
             return False
-
+    
     def save_regions_to_file(self, filename="roi_config.json"):
         """Save the current ROI configuration to a file"""
         try:
@@ -1012,12 +948,12 @@ class PokerScreenGrabber:
                 return True
             else:
                 logger.warning(f"ROI configuration file not found: {filename}")
-                # Return false but don't reset to defaults - caller should handle this
-                return False
         except Exception as e:
             logger.error(f"Failed to load ROI configuration: {str(e)}")
-            # Return false but don't reset to defaults
-            return False
+        
+        # If we get here, loading failed - use default ROI
+        self.roi = self._get_default_roi()
+        return False
     
     def _detect_card(self, img, card_region):
         """
@@ -1094,7 +1030,7 @@ class PokerScreenGrabber:
         except Exception as e:
             logger.error(f"Error detecting chip count: {str(e)}")
             return 0
-    
+
     def add_debugging_overlay(self, img):
         """
         Add visual debugging information to the screenshot showing analyzed regions
@@ -1113,6 +1049,9 @@ class PokerScreenGrabber:
             # Create a copy to avoid modifying the original
             debug_img = img.copy()
             
+            # Log the image dimensions
+            logger.info(f"Debug overlay image dimensions: {img.shape}")
+            
             # Define colors for different region types
             colors = {
                 'community_cards': (0, 255, 0),      # Green
@@ -1125,73 +1064,186 @@ class PokerScreenGrabber:
                 'actions': (200, 200, 200)           # Gray
             }
             
+            # Debug directory for extracted regions
+            debug_dir = "debug_roi_regions"
+            os.makedirs(debug_dir, exist_ok=True)
+            timestamp = int(time.time())
+            
             # Draw community card regions
             if 'community_cards' in self.roi:
                 for i, region in enumerate(self.roi['community_cards']):
                     x, y, w, h = region
-                    cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['community_cards'], 2)
-                    cv2.putText(debug_img, f"CC {i+1}", (x, y-5), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['community_cards'], 1)
+                    
+                    # Ensure coordinates are within image bounds
+                    if x >= 0 and y >= 0 and x+w <= img.shape[1] and y+h <= img.shape[0]:
+                        # Extract the region and save it for debugging
+                        region_img = img[y:y+h, x:x+w]
+                        region_path = f"{debug_dir}/community_card_{i}_{timestamp}.png"
+                        cv2.imwrite(region_path, region_img)
+                        
+                        # Draw rectangle and label
+                        cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['community_cards'], 2)
+                        cv2.putText(debug_img, f"CC {i+1}", (x, y-5), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['community_cards'], 1)
+                    else:
+                        logger.warning(f"Community card region {i} out of bounds: {region}")
             
             # Draw player card regions
             if 'player_cards' in self.roi:
                 for player_id, regions in self.roi['player_cards'].items():
                     for i, region in enumerate(regions):
                         x, y, w, h = region
-                        cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['player_cards'], 2)
-                        cv2.putText(debug_img, f"P{player_id} C{i+1}", (x, y-5), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['player_cards'], 1)
+                        
+                        # Ensure coordinates are within image bounds
+                        if x >= 0 and y >= 0 and x+w <= img.shape[1] and y+h <= img.shape[0]:
+                            # Extract the region and save it for debugging
+                            region_img = img[y:y+h, x:x+w]
+                            region_path = f"{debug_dir}/player_{player_id}_card_{i}_{timestamp}.png"
+                            cv2.imwrite(region_path, region_img)
+                            
+                            # Draw rectangle and label
+                            cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['player_cards'], 2)
+                            cv2.putText(debug_img, f"P{player_id} C{i+1}", (x, y-5), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['player_cards'], 1)
+                        else:
+                            logger.warning(f"Player card region {player_id}-{i} out of bounds: {region}")
             
             # Draw player chip regions
             if 'player_chips' in self.roi:
                 for player_id, regions in self.roi['player_chips'].items():
                     for i, region in enumerate(regions):
                         x, y, w, h = region
-                        cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['player_chips'], 2)
-                        cv2.putText(debug_img, f"P{player_id} $", (x, y-5), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['player_chips'], 1)
+                        
+                        # Ensure coordinates are within image bounds
+                        if x >= 0 and y >= 0 and x+w <= img.shape[1] and y+h <= img.shape[0]:
+                            # Extract the region and save it for debugging
+                            region_img = img[y:y+h, x:x+w]
+                            region_path = f"{debug_dir}/player_{player_id}_chips_{timestamp}.png"
+                            cv2.imwrite(region_path, region_img)
+                            
+                            # Draw rectangle and label
+                            cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['player_chips'], 2)
+                            cv2.putText(debug_img, f"P{player_id} $", (x, y-5), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['player_chips'], 1)
+                        else:
+                            logger.warning(f"Player chip region {player_id}-{i} out of bounds: {region}")
             
             # Draw main player chips region
             if 'main_player_chips' in self.roi:
                 for i, region in enumerate(self.roi['main_player_chips']):
                     x, y, w, h = region
-                    cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['main_player_chips'], 2)
-                    cv2.putText(debug_img, "Main $", (x, y-5), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['main_player_chips'], 1)
+                    
+                    # Ensure coordinates are within image bounds
+                    if x >= 0 and y >= 0 and x+w <= img.shape[1] and y+h <= img.shape[0]:
+                        # Extract the region and save it for debugging
+                        region_img = img[y:y+h, x:x+w]
+                        region_path = f"{debug_dir}/main_player_chips_{timestamp}.png"
+                        cv2.imwrite(region_path, region_img)
+                        
+                        # Draw rectangle and label
+                        cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['main_player_chips'], 2)
+                        cv2.putText(debug_img, "Main $", (x, y-5), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['main_player_chips'], 1)
+                    else:
+                        logger.warning(f"Main player chip region {i} out of bounds: {region}")
             
             # Draw current bets regions
             if 'current_bets' in self.roi:
                 for player_id, regions in self.roi['current_bets'].items():
                     for i, region in enumerate(regions):
                         x, y, w, h = region
-                        cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['current_bets'], 2)
-                        cv2.putText(debug_img, f"P{player_id} Bet", (x, y-5), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['current_bets'], 1)
+                        
+                        # Ensure coordinates are within image bounds
+                        if x >= 0 and y >= 0 and x+w <= img.shape[1] and y+h <= img.shape[0]:
+                            # Extract the region and save it for debugging
+                            region_img = img[y:y+h, x:x+w]
+                            region_path = f"{debug_dir}/player_{player_id}_bet_{timestamp}.png"
+                            cv2.imwrite(region_path, region_img)
+                            
+                            # Draw rectangle and label
+                            cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['current_bets'], 2)
+                            cv2.putText(debug_img, f"P{player_id} Bet", (x, y-5), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['current_bets'], 1)
+                        else:
+                            logger.warning(f"Current bet region {player_id}-{i} out of bounds: {region}")
             
             # Draw game stage regions
             if 'game_stage' in self.roi:
                 for i, region in enumerate(self.roi['game_stage']):
                     x, y, w, h = region
-                    cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['game_stage'], 2)
-                    cv2.putText(debug_img, f"Stage {i+1}", (x, y-5), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['game_stage'], 1)
+                    
+                    # Ensure coordinates are within image bounds
+                    if x >= 0 and y >= 0 and x+w <= img.shape[1] and y+h <= img.shape[0]:
+                        # Extract the region and save it for debugging
+                        region_img = img[y:y+h, x:x+w]
+                        region_path = f"{debug_dir}/game_stage_{i}_{timestamp}.png"
+                        cv2.imwrite(region_path, region_img)
+                        
+                        # Draw rectangle and label
+                        cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['game_stage'], 2)
+                        cv2.putText(debug_img, f"Stage {i+1}", (x, y-5), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['game_stage'], 1)
+                    else:
+                        logger.warning(f"Game stage region {i} out of bounds: {region}")
             
             # Draw pot region
             if 'pot' in self.roi:
                 for i, region in enumerate(self.roi['pot']):
                     x, y, w, h = region
-                    cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['pot'], 2)
-                    cv2.putText(debug_img, "Pot", (x, y-5), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['pot'], 1)
+                    
+                    # Ensure coordinates are within image bounds
+                    if x >= 0 and y >= 0 and x+w <= img.shape[1] and y+h <= img.shape[0]:
+                        # Extract the region and save it for debugging
+                        region_img = img[y:y+h, x:x+w]
+                        region_path = f"{debug_dir}/pot_{timestamp}.png"
+                        cv2.imwrite(region_path, region_img)
+                        
+                        # Draw rectangle and label
+                        cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['pot'], 2)
+                        cv2.putText(debug_img, "Pot", (x, y-5), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['pot'], 1)
+                    else:
+                        logger.warning(f"Pot region {i} out of bounds: {region}")
             
             # Draw action regions
             if 'actions' in self.roi:
                 for action, regions in self.roi['actions'].items():
                     for i, region in enumerate(regions):
                         x, y, w, h = region
-                        cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['actions'], 2)
-                        cv2.putText(debug_img, action.capitalize(), (x, y-5), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['actions'], 1)
+                        
+                        # Ensure coordinates are within image bounds
+                        if x >= 0 and y >= 0 and x+w <= img.shape[1] and y+h <= img.shape[0]:
+                            # Extract the region and save it for debugging
+                            region_img = img[y:y+h, x:x+w]
+                            region_path = f"{debug_dir}/action_{action}_{timestamp}.png"
+                            cv2.imwrite(region_path, region_img)
+                            
+                            # Draw rectangle and label
+                            cv2.rectangle(debug_img, (x, y), (x+w, y+h), colors['actions'], 2)
+                            cv2.putText(debug_img, action.capitalize(), (x, y-5), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors['actions'], 1)
+                        else:
+                            logger.warning(f"Action region {action}-{i} out of bounds: {region}")
+            
+            # Create a combined debug summary image
+            h, w = img.shape[:2]
+            summary_img = np.zeros((h, w, 3), dtype=np.uint8)
+            summary_img[:, :, :] = img[:, :, :]
+            
+            # Add image info
+            cv2.putText(summary_img, f"Image size: {w}x{h}", (10, 20), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # Add timestamp
+            time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cv2.putText(summary_img, time_str, (10, 40), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # Save the summary image
+            summary_path = f"{debug_dir}/roi_summary_{timestamp}.png"
+            cv2.imwrite(summary_path, summary_img)
+            
+            logger.info(f"Saved ROI debug images to {debug_dir}")
             
             # Add legend
             legend_y = 20
@@ -1201,28 +1253,16 @@ class PokerScreenGrabber:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
                     legend_y += 20
             
-            # Add detection info if available
-            if self.last_detection_info:
-                # Add header for detection info
-                cv2.putText(debug_img, "Detection Info:", (10, legend_y + 20), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                legend_y += 40
-                
-                # Display up to 3 detection results
-                count = 0
-                for key, value in self.last_detection_info.items():
-                    if count < 3:
-                        cv2.putText(debug_img, f"{key}: {value}", (10, legend_y), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                        legend_y += 20
-                        count += 1
+            # Add image dimensions info
+            cv2.putText(debug_img, f"Image: {img.shape[1]}x{img.shape[0]}", (10, legend_y + 20), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
             return debug_img
         
         except Exception as e:
             logger.error(f"Error adding debugging overlay: {str(e)}", exc_info=True)
             return img  # Return original image if error occurs
-    
+
     def _get_default_roi(self):
         """Return the default ROIs for PokerTH"""
         return {

@@ -5,14 +5,14 @@ import logging
 import json
 import os
 
-import improved_poker_cv_analyzer as PokerCardDetector
+from improved_poker_cv_analyzer import ImprovedCardDetector
 
 # Set up logging
 logger = logging.getLogger("CardDetector")
 
 class PokerImageAnalyzer:
     def __init__(self):
-        self.card_detector = PokerCardDetector()
+        self.card_detector = ImprovedCardDetector()
         
         # Define regions of interest for PokerTH 1.1.2
         # These would need to be calibrated for the actual game window
