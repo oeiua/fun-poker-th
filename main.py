@@ -134,7 +134,7 @@ class PokerApplication:
             'confidence_threshold': 0.7,
             'auto_detect_poker': True,
             'use_mock_data': True,
-            'show_debug_overlay': True,
+            'show_debug_overlay': False,
             'device': None,  # Auto-select device (CPU/GPU)
             'ui_refresh_rate': 1.0  # UI update interval in seconds
         }

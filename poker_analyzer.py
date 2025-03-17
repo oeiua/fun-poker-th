@@ -19,6 +19,8 @@ class OptimizedPokerAnalyzer:
     
     def __init__(self, template_dir="card_templates"):
         self.card_detector = ImprovedCardDetector(template_dir)
+        self.card_detector.debug_mode = True
+
         self.text_recognizer = EnhancedTextRecognition()
         self.logger = logging.getLogger("PokerAnalyzer")
         
