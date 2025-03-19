@@ -4,6 +4,8 @@ import os
 import logging
 import json
 from collections import Counter
+import tensorflow as tf
+import time
 
 # Set up logging - reduced verbosity
 logging.basicConfig(level=logging.INFO)
@@ -11,10 +13,10 @@ logger = logging.getLogger("CardDetector")
 
 class ImprovedCardDetector:
     """
-    OpenCV-based card detector with robust correction system for poker games
+    Neural network-based card detector with OpenCV fallback for poker games
     """
     
-    def __init__(self, template_dir="card_templates", debug_mode=False):
+    def __init__(self, model_path="card_model.h5", template_dir="card_templates", debug_mode=False, save_debug_images=True):
         self.template_dir = template_dir
         self.card_values = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
         self.card_suits = ['hearts', 'diamonds', 'clubs', 'spades']
@@ -23,6 +25,12 @@ class ImprovedCardDetector:
         self.white_threshold = 170
         self.min_white_percent = 20
         self.debug_mode = debug_mode
+        self.save_debug_images = save_debug_images
+        
+        # Create debug directory if needed
+        if self.save_debug_images:
+            self.debug_dir = os.path.join(template_dir, "debug_images")
+            os.makedirs(self.debug_dir, exist_ok=True)
         
         # Ensure template directory exists
         os.makedirs(template_dir, exist_ok=True)
@@ -32,6 +40,42 @@ class ImprovedCardDetector:
         
         # Cache for detected cards to improve performance
         self._detection_cache = {}
+        
+        # Target size for the neural network model
+        self.img_height, self.img_width = 20, 50
+        
+        # Define class mapping for model predictions
+        self.class_mapping = self._create_class_mapping()
+        
+        # Load the neural network model
+        self.model = None
+        self.model_path = model_path
+        self._load_model()
+        
+        # Counter for processed images
+        self.processed_count = 0
+    
+    def _load_model(self):
+        """Load the pre-trained TensorFlow model if available"""
+        try:
+            if os.path.exists(self.model_path):
+                start_time = time.time()
+                self.model = tf.keras.models.load_model(self.model_path)
+                load_time = time.time() - start_time
+                logger.info(f"Card detection model loaded from {self.model_path} in {load_time:.2f} seconds")
+                
+                # Warm up the model with a dummy prediction
+                dummy_input = np.zeros((1, self.img_height, self.img_width, 3), dtype=np.float32)
+                self.model.predict(dummy_input)
+                
+                return True
+            else:
+                logger.warning(f"Card detection model not found at {self.model_path}, using fallback detection methods")
+                return False
+        except Exception as e:
+            logger.error(f"Error loading card detection model: {str(e)}")
+            logger.warning("Using fallback detection methods")
+            return False
     
     def _load_corrections(self):
         """Load corrections from file"""
@@ -105,9 +149,120 @@ class ImprovedCardDetector:
         small_img = cv2.resize(card_img, (16, 16))
         return hash(small_img.tobytes()[:100])
     
+    def _preprocess_image(self, card_img):
+        """Preprocess the card image for the neural network"""
+        try:
+            if card_img is None or card_img.size == 0:
+                return None
+            
+            # In this version, we don't resize the image - we pass it as is
+            # Just ensure it's in the right color format (RGB) as neural networks typically expect RGB
+            if len(card_img.shape) == 3 and card_img.shape[2] == 3:
+                # Convert from BGR (OpenCV) to RGB (what most models expect)
+                rgb_img = cv2.cvtColor(card_img, cv2.COLOR_BGR2RGB)
+            else:
+                # If grayscale, convert to RGB
+                rgb_img = cv2.cvtColor(card_img, cv2.COLOR_GRAY2RGB)
+            
+            # Normalize pixel values to [0, 1]
+            normalized_img = rgb_img.astype(np.float32) / 255.0
+            
+            # Add batch dimension
+            return np.expand_dims(normalized_img, axis=0)
+        except Exception as e:
+            logger.error(f"Error preprocessing image: {str(e)}")
+            return None
+            
+    def _save_debug_image(self, card_img):
+        """Save original image for debugging"""
+        try:
+            # Create unique filename
+            self.processed_count += 1
+            filename = f"card_{self.processed_count:04d}"
+            
+            # Save original image
+            original_path = os.path.join(self.debug_dir, f"{filename}_original.png")
+            cv2.imwrite(original_path, card_img)
+            
+            # Convert to RGB for visualization
+            if len(card_img.shape) == 3 and card_img.shape[2] == 3:
+                rgb_img = cv2.cvtColor(card_img, cv2.COLOR_BGR2RGB)
+            else:
+                rgb_img = cv2.cvtColor(card_img, cv2.COLOR_GRAY2RGB)
+            
+            # Save visualization of the RGB version
+            viz_path = os.path.join(self.debug_dir, f"{filename}_rgb.png")
+            rgb_for_save = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2BGR)  # Convert back to BGR for OpenCV
+            cv2.imwrite(viz_path, rgb_for_save)
+            
+            logger.info(f"Saved debug image for card {self.processed_count} to {self.debug_dir}")
+        except Exception as e:
+            logger.error(f"Error saving debug images: {str(e)}")
+    
+    def _create_class_mapping(self):
+        """Create a mapping between class indices and card names"""
+        # Create a list of all possible card combinations
+        all_cards = []
+        for value in self.card_values:
+            for suit in self.card_suits:
+                card_name = f"{value.lower()}_of_{suit}"
+                all_cards.append(card_name)
+        
+        # Add special cases if needed
+        for extra in ["joker_red", "joker_black", "card_back"]:
+            all_cards.append(extra)
+        
+        # Create mapping dictionary
+        class_mapping = {i: card_name for i, card_name in enumerate(all_cards)}
+        
+        if self.debug_mode:
+            logger.info(f"Created class mapping with {len(class_mapping)} classes")
+        
+        return class_mapping
+            
+    def _parse_prediction(self, prediction):
+        """Parse the model prediction to get value and suit"""
+        try:
+            # Get the class with highest probability
+            predicted_class_idx = np.argmax(prediction[0])
+            confidence = float(prediction[0][predicted_class_idx])
+            
+            # If confidence is too low, return None
+            if confidence < 0.5:  # Confidence threshold
+                logger.debug(f"Low confidence prediction: {confidence:.2f}")
+                return None, None
+            
+            # If we have access to class names from the model, use them
+            if hasattr(self.model, 'class_names'):
+                class_name = self.model.class_names[predicted_class_idx]
+            # Otherwise use our predefined mapping
+            elif predicted_class_idx in self.class_mapping:
+                class_name = self.class_mapping[predicted_class_idx]
+            else:
+                logger.warning(f"Unknown class index: {predicted_class_idx}")
+                return None, None
+            
+            # Parse the card value and suit from the class name
+            if '_of_' in class_name:
+                value, suit = class_name.split('_of_')
+                # Convert value to standard format
+                value = value.upper() if value in ['j', 'q', 'k', 'a'] else value
+                
+                # Log the successful prediction
+                if self.debug_mode:
+                    logger.debug(f"Predicted {value} of {suit} with confidence {confidence:.2f}")
+                
+                return value, suit
+            else:
+                logger.warning(f"Unexpected prediction format: {class_name}")
+                return None, None
+        except Exception as e:
+            logger.error(f"Error parsing prediction: {str(e)}")
+            return None, None
+    
     def detect_card(self, card_img):
         """
-        Detect card value and suit using direct OpenCV analysis
+        Detect card value and suit using neural network with OpenCV fallback
         
         Args:
             card_img: Image of a card (in BGR format from OpenCV)
@@ -119,10 +274,37 @@ class ImprovedCardDetector:
             if card_img is None or card_img.size == 0:
                 return '?', '?'
             
+            # Save original image for debugging without modifications
+            if self.save_debug_images:
+                self._save_debug_image(card_img.copy())
+            
             # Check cache first for improved performance
             card_hash = self._compute_card_hash(card_img)
             if card_hash in self._detection_cache:
                 return self._detection_cache[card_hash]
+            
+            # Try neural network prediction first if model is available
+            if self.model is not None:
+                try:
+                    # Preprocess the image - use original image, not one with debug overlays
+                    processed_img = self._preprocess_image(card_img.copy())
+                    if processed_img is not None:
+                        # Make prediction
+                        prediction = self.model.predict(processed_img, verbose=0)
+                        
+                        # Parse the prediction
+                        value, suit = self._parse_prediction(prediction)
+                        
+                        # If prediction is valid, return it
+                        if value is not None and suit is not None:
+                            # Cache the result
+                            self._detection_cache[card_hash] = (value, suit)
+                            return value, suit
+                except Exception as e:
+                    logger.warning(f"Neural network prediction failed: {str(e)}")
+                    # Fall back to traditional detection methods
+            
+            # FALLBACK: Use traditional OpenCV-based detection
             
             # STEP 1: Determine if card is red or black
             red_percent = self._calculate_red_percentage(card_img)

@@ -6,6 +6,8 @@ __pycache__/
 logs/
 poker_data/
 card_templates/
+card_templates*/
+*.h5
 # C extensions
 *.so
 

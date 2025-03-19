@@ -17,8 +17,8 @@ logger = logging.getLogger("PokerAnalyzer")
 class OptimizedPokerAnalyzer:
     """Analyze poker screenshots with optimized performance and accuracy"""
     
-    def __init__(self, template_dir="card_templates"):
-        self.card_detector = ImprovedCardDetector(template_dir)
+    def __init__(self, template_dir="card_templates", model_path="card_model.h5"):
+        self.card_detector = ImprovedCardDetector(model_path=model_path, template_dir=template_dir)
         self.card_detector.debug_mode = True
 
         self.text_recognizer = EnhancedTextRecognition()
@@ -131,12 +131,16 @@ class OptimizedPokerAnalyzer:
         try:
             # Load the image
             start_time = time.time()
-            img = cv2.imread(image_path)
+            original_img = cv2.imread(image_path)
             
             # Check if the image was loaded successfully
-            if img is None or img.size == 0:
+            if original_img is None or original_img.size == 0:
                 self.logger.error(f"Failed to load image or empty image: {image_path}")
                 return self._create_default_game_state()
+            
+            # Make a working copy of the image for visualization
+            # This ensures we keep the original image clean for card extraction
+            img = original_img.copy()
             
             # Create game state dictionary
             game_state = {
@@ -147,25 +151,25 @@ class OptimizedPokerAnalyzer:
             }
             
             # Detect game stage first to know how many community cards to expect
-            game_stage, visible_cards = self._detect_game_stage(img)
+            game_stage, visible_cards = self._detect_game_stage(original_img)
             game_state['game_stage'] = game_stage
             
-            # Extract community cards
+            # Extract community cards - use the original image, not the working copy
             for i, card_region in enumerate(self.roi['community_cards']):
                 if i < visible_cards:
-                    self._extract_card(img, card_region, game_state['community_cards'])
+                    self._extract_card(original_img, card_region, game_state['community_cards'])
             
-            # Extract player information
+            # Extract player information - use the original image, not the working copy
             for player_id, card_regions in self.roi.get('player_cards', {}).items():
                 # Check if player is active
-                if self._is_player_active(img, player_id):
+                if self._is_player_active(original_img, player_id):
                     player_cards = []
                     for card_region in card_regions:
-                        self._extract_card(img, card_region, player_cards)
+                        self._extract_card(original_img, card_region, player_cards)
                     
                     # Get player's chip count
                     chip_region = self.roi.get('player_chips', {}).get(player_id, [(0, 0, 0, 0)])[0]
-                    chips = self._extract_chip_count(img, chip_region)
+                    chips = self._extract_chip_count(original_img, chip_region)
                     
                     game_state['players'][player_id] = {
                         'chips': chips,
@@ -175,7 +179,7 @@ class OptimizedPokerAnalyzer:
             
             # Extract pot size
             if 'pot' in self.roi and self.roi['pot']:
-                game_state['pot'] = self._extract_pot_size(img, self.roi['pot'][0])
+                game_state['pot'] = self._extract_pot_size(original_img, self.roi['pot'][0])
             
             # Calculate elapsed time
             elapsed_time = time.time() - start_time
@@ -208,14 +212,18 @@ class OptimizedPokerAnalyzer:
             if not self._is_valid_region(region, img.shape):
                 return
                     
-            # Extract card image
-            card_img = img[y:y+h, x:x+w]
+            # Make a clean copy of the original source image before extracting
+            original_img = img.copy()
+                    
+            # Extract card image from the CLEAN copy (without any debug overlays)
+            card_img = original_img[y:y+h, x:x+w]
             
             # Check if card is visible (not folded)
             if not self._is_card_visible(card_img):
                 return
                 
-            # Detect the card
+            # Detect the card using our neural network-enhanced detector
+            # The detector will get a clean image without any overlays
             value, suit = self.card_detector.detect_card(card_img)
             
             # Only add valid cards
@@ -224,6 +232,9 @@ class OptimizedPokerAnalyzer:
                     'value': value,
                     'suit': suit
                 })
+                
+                if self.logger.isEnabledFor(logging.DEBUG):
+                    self.logger.debug(f"Detected card: {value} of {suit}")
         except Exception as e:
             logger.error(f"Error extracting card: {str(e)}")
 
@@ -383,7 +394,9 @@ class OptimizedPokerAnalyzer:
     def clear_cache(self):
         """Clear the analysis cache"""
         self._analysis_cache.clear()
-        self.logger.info("Analysis cache cleared")
+        self.card_detector.clear_cache()
+        self.text_recognizer.clear_cache()
+        self.logger.info("All caches cleared")
     
     def analyze_batch(self, image_paths):
         """
@@ -447,90 +460,3 @@ class OptimizedPokerAnalyzer:
         except Exception as e:
             self.logger.error(f"Error analyzing sequence: {str(e)}", exc_info=True)
             return []
-
-
-# Test function
-def test_poker_analyzer():
-    """Test the poker analyzer with a sample image"""
-    print("Testing OptimizedPokerAnalyzer...")
-    
-    # Create analyzer
-    analyzer = OptimizedPokerAnalyzer()
-    
-    # Check if test directory exists, create it if it doesn't
-    test_dir = "test_output"
-    os.makedirs(test_dir, exist_ok=True)
-    
-    # Create a sample image for testing
-    img_size = (800, 600, 3)  # width, height, channels
-    test_img = np.zeros(img_size, dtype=np.uint8)
-    
-    # Add green poker table background
-    cv2.ellipse(test_img, (400, 300), (350, 250), 0, 0, 360, (0, 100, 0), -1)
-    
-    # Add white areas for cards
-    # Community cards
-    for i in range(3):  # Draw 3 cards for flop
-        x = 300 + i * 60
-        y = 220
-        cv2.rectangle(test_img, (x, y), (x + 45, y + 65), (255, 255, 255), -1)
-        # Add card value/suit
-        suit_color = (0, 0, 255) if i % 2 == 0 else (0, 0, 0)
-        cv2.putText(test_img, "A" if i == 0 else ("K" if i == 1 else "Q"), 
-                   (x + 5, y + 25), cv2.FONT_HERSHEY_SIMPLEX, 1, suit_color, 2)
-    
-    # Player cards
-    player_card_x = [510, 560]
-    player_card_y = 330
-    for i in range(2):
-        x = player_card_x[i]
-        y = player_card_y
-        cv2.rectangle(test_img, (x, y), (x + 45, y + 65), (255, 255, 255), -1)
-        # Add card value/suit
-        cv2.putText(test_img, "J" if i == 0 else "10", 
-                   (x + 5, y + 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-    
-    # Add chip count and pot text
-    cv2.putText(test_img, "$1000", (280, 380), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-    cv2.putText(test_img, "$150", (280, 248), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-    
-    # Save test image
-    test_img_path = os.path.join(test_dir, "test_poker_table.png")
-    cv2.imwrite(test_img_path, test_img)
-    print(f"Created test image: {test_img_path}")
-    
-    # Analyze the image
-    start_time = time.time()
-    game_state = analyzer.analyze_image(test_img_path)
-    elapsed_time = time.time() - start_time
-    
-    # Print results
-    print(f"\nAnalysis completed in {elapsed_time:.3f} seconds")
-    print("\nDetected Game State:")
-    print(f"Game Stage: {game_state['game_stage']}")
-    print(f"Pot Size: ${game_state['pot']}")
-    
-    print("\nCommunity Cards:")
-    for i, card in enumerate(game_state['community_cards']):
-        print(f"  Card {i+1}: {card['value']} of {card['suit']}")
-    
-    print("\nPlayers:")
-    for player_id, player_data in game_state['players'].items():
-        print(f"  Player {player_id}:")
-        print(f"    Chips: ${player_data['chips']}")
-        
-        if player_data.get('cards'):
-            cards_str = ", ".join([f"{card['value']} of {card['suit']}" for card in player_data['cards']])
-            print(f"    Cards: {cards_str}")
-    
-    # Test caching performance
-    print("\nTesting analysis cache...")
-    start_time = time.time()
-    cached_game_state = analyzer.analyze_image(test_img_path)
-    cached_elapsed_time = time.time() - start_time
-    
-    print(f"Cached analysis completed in {cached_elapsed_time:.3f} seconds")
-    print(f"Speedup factor: {elapsed_time / max(cached_elapsed_time, 0.0001):.1f}x")
-
-if __name__ == "__main__":
-    test_poker_analyzer()
