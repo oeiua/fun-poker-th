@@ -8,7 +8,7 @@ import tensorflow as tf
 import time
 
 # Set up logging - reduced verbosity
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("CardDetector")
 
 class ImprovedCardDetector:
@@ -16,7 +16,7 @@ class ImprovedCardDetector:
     Neural network-based card detector with OpenCV fallback for poker games
     """
     
-    def __init__(self, model_path="card_model.h5", template_dir="card_templates", debug_mode=False, save_debug_images=True):
+    def __init__(self, model_path="card_model.h5", template_dir="card_templates", debug_mode=True, save_debug_images=True):
         self.template_dir = template_dir
         self.card_values = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
         self.card_suits = ['hearts', 'diamonds', 'clubs', 'spades']
@@ -229,7 +229,7 @@ class ImprovedCardDetector:
             
             # If confidence is too low, return None
             if confidence < 0.5:  # Confidence threshold
-                logger.debug(f"Low confidence prediction: {confidence:.2f}")
+                logger.warning(f"Low confidence prediction: {confidence:.2f}")
                 return None, None
             
             # If we have access to class names from the model, use them
@@ -250,7 +250,7 @@ class ImprovedCardDetector:
                 
                 # Log the successful prediction
                 if self.debug_mode:
-                    logger.debug(f"Predicted {value} of {suit} with confidence {confidence:.2f}")
+                    logger.warning(f"Predicted {value} of {suit} with confidence {confidence:.2f}")
                 
                 return value, suit
             else:
@@ -292,6 +292,8 @@ class ImprovedCardDetector:
                         # Make prediction
                         prediction = self.model.predict(processed_img, verbose=0)
                         
+                        
+
                         # Parse the prediction
                         value, suit = self._parse_prediction(prediction)
                         

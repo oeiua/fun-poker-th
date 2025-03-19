@@ -614,7 +614,6 @@ class AutoROICalibrator:
 
 class PokerScreenGrabber:
     """Enhanced screen grabber for poker gameplay with optimized performance"""
-    
     def __init__(self, capture_interval=2.0, output_dir="poker_data"):
         # Settings
         self.capture_interval = capture_interval
@@ -647,13 +646,14 @@ class PokerScreenGrabber:
         self.current_state = None
         self.last_detection_info = {}
         
-        # Screenshot cache to avoid redundant processing
+        # Screenshot cache to avoid redundant processing - updated to store both original and overlay versions
         self._screenshot_cache = {
             "last_time": 0,
-            "screenshot": None,
+            "screenshot_original": None,  # Original screenshot without overlay
+            "screenshot_with_overlay": None,  # Screenshot with debug overlay
             "path": None
-        }
-    
+        } 
+
     def get_window_list(self):
         """Get a list of all visible windows with improved error handling"""
         windows = []
@@ -790,26 +790,31 @@ class PokerScreenGrabber:
             self.logger.error(f"Error capturing window: {str(e)}", exc_info=True)
             return self.create_mock_screenshot()
     
-    def capture_screenshot(self, use_cache=True, max_cache_age=1.0):
+    def capture_screenshot(self, use_cache=True, max_cache_age=1.0, with_overlay=True):
         """
         Capture a screenshot of the selected window with caching for improved performance
         
         Args:
             use_cache: Whether to use the cached screenshot if available
             max_cache_age: Maximum age of the cached screenshot in seconds
+            with_overlay: Whether to apply debugging overlay to the returned image
             
         Returns:
-            numpy.ndarray: Screenshot image
+            numpy.ndarray: Screenshot image (with or without overlays)
         """
         try:
             current_time = time.time()
             
             # Check if we can use the cached screenshot
             if (use_cache and 
-                self._screenshot_cache["screenshot"] is not None and 
+                self._screenshot_cache["screenshot_original"] is not None and 
                 current_time - self._screenshot_cache["last_time"] < max_cache_age):
                 self.logger.debug("Using cached screenshot")
-                return self._screenshot_cache["screenshot"]
+                # Return either original or overlay version
+                if with_overlay and self.show_debug_overlay:
+                    return self._screenshot_cache["screenshot_with_overlay"]
+                else:
+                    return self._screenshot_cache["screenshot_original"]
             
             self.logger.info("Capturing new screenshot")
             
@@ -829,47 +834,94 @@ class PokerScreenGrabber:
                 if img is None:
                     img = self.create_mock_screenshot()
                 
-                # Add debugging overlay if enabled
-                if self.show_debug_overlay:
-                    img = self.add_debugging_overlay(img)
+                # Store the original image
+                original_img = img.copy()
                 
-                # Update cache
-                self._screenshot_cache["screenshot"] = img
+                # Create version with overlay if needed
+                img_with_overlay = original_img.copy()
+                if self.show_debug_overlay:
+                    img_with_overlay = self.add_debugging_overlay(img_with_overlay)
+                
+                # Update cache with both versions
+                self._screenshot_cache["screenshot_original"] = original_img
+                self._screenshot_cache["screenshot_with_overlay"] = img_with_overlay
                 self._screenshot_cache["last_time"] = current_time
                 
-                return img
+                # Return the appropriate version
+                if with_overlay and self.show_debug_overlay:
+                    return img_with_overlay
+                else:
+                    return original_img
             else:
                 self.logger.warning("No window selected for capture - using mock screenshot")
                 img = self.create_mock_screenshot()
                 
-                if self.show_debug_overlay:
-                    img = self.add_debugging_overlay(img)
+                # Store the original image
+                original_img = img.copy()
                 
-                return img
+                # Create version with overlay if needed
+                img_with_overlay = original_img.copy()
+                if self.show_debug_overlay:
+                    img_with_overlay = self.add_debugging_overlay(img_with_overlay)
+                
+                # Update cache with both versions
+                self._screenshot_cache["screenshot_original"] = original_img
+                self._screenshot_cache["screenshot_with_overlay"] = img_with_overlay
+                self._screenshot_cache["last_time"] = current_time
+                
+                # Return the appropriate version
+                if with_overlay and self.show_debug_overlay:
+                    return img_with_overlay
+                else:
+                    return original_img
         
         except Exception as e:
             self.logger.error(f"Error capturing screenshot: {str(e)}", exc_info=True)
             img = self.create_mock_screenshot()
             
+            # Store the original image
+            original_img = img.copy()
+            
+            # Create version with overlay if needed
+            img_with_overlay = original_img.copy()
             try:
                 if self.show_debug_overlay:
-                    img = self.add_debugging_overlay(img)
+                    img_with_overlay = self.add_debugging_overlay(img_with_overlay)
             except:
                 pass
                 
-            return img
+            # Update cache with both versions
+            self._screenshot_cache["screenshot_original"] = original_img
+            self._screenshot_cache["screenshot_with_overlay"] = img_with_overlay
+            self._screenshot_cache["last_time"] = current_time
+            
+            # Return the appropriate version
+            if with_overlay and self.show_debug_overlay:
+                return img_with_overlay
+            else:
+                return original_img
     
     def save_screenshot(self, img, filepath):
         """
-        Save a screenshot to a file with error handling
+        Save a screenshot to a file with error handling.
+        Always saves the original image without overlays.
         
         Args:
-            img: Screenshot image as numpy array
+            img: Screenshot image as numpy array (can be with or without overlay)
             filepath: Path to save the screenshot
         """
         try:
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            cv2.imwrite(filepath, img)
+            
+            # Always save the original image without overlays
+            if "screenshot_original" in self._screenshot_cache and self._screenshot_cache["screenshot_original"] is not None:
+                # Save the cached original
+                cv2.imwrite(filepath, self._screenshot_cache["screenshot_original"])
+            else:
+                # If no cached original, save the provided image
+                # This is a fallback and might include overlays
+                cv2.imwrite(filepath, img)
+            
             self.logger.info(f"Screenshot saved to {filepath}")
             
             # Update cache path

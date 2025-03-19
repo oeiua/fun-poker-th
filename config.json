@@ -1,5 +1,5 @@
 {
-  "capture_interval": 5.0,
+  "capture_interval": 20.0,
   "screenshot_dir": "poker_data/screenshots",
   "game_state_dir": "poker_data/game_states",
   "training_data_dir": "poker_data/training",
@@ -8,9 +8,9 @@
   "auto_play": false,
   "confidence_threshold": 0.7,
   "auto_detect_poker": true,
-  "use_mock_data": true,
-  "show_debug_overlay": true,
+  "use_mock_data": false,
+  "show_debug_overlay": false,
   "device": "cpu",
   "ui_refresh_rate": 1.0,
-  "log_level": "INFO"
+  "log_level": "DEBUG"
 }

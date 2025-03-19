@@ -344,7 +344,8 @@ class PokerAssistant:
                 
                 while (time.time() - capture_start_time) < capture_timeout:
                     try:
-                        screenshot = self.screen_grabber.capture_screenshot()
+                        # Get screenshot with overlay for display purposes
+                        screenshot = self.screen_grabber.capture_screenshot(with_overlay=True)
                         break
                     except Exception as e:
                         logger.error(f"Error in screenshot capture attempt: {str(e)}")
@@ -358,10 +359,10 @@ class PokerAssistant:
                 if screenshot is not None:
                     logger.debug(f"Screenshot captured successfully, shape: {screenshot.shape}")
                     
-                    # Store the latest screenshot
+                    # Store the latest screenshot (with overlay for display)
                     self.latest_screenshot = screenshot
                     
-                    # Save screenshot
+                    # Save screenshot - Note: save_screenshot will save the original version without overlay
                     screenshot_path = os.path.join(
                         self.config['screenshot_dir'],
                         f"screenshot_{timestamp}.png"
@@ -396,7 +397,7 @@ class PokerAssistant:
                 # Use a more responsive sleep approach that can be interrupted
                 sleep_start = time.time()
                 while (time.time() - sleep_start < capture_interval and 
-                       self.running and not self.exit_flag.is_set()):
+                    self.running and not self.exit_flag.is_set()):
                     time.sleep(0.1)
             
             except Exception as e:
@@ -407,7 +408,7 @@ class PokerAssistant:
                 time.sleep(1.0)
         
         logger.info("Screenshot capture thread stopped")
-    
+
     def _analysis_loop(self):
         """Analyze screenshots to extract game state with improved error handling and batch processing"""
         logger.info("Image analysis thread started")
