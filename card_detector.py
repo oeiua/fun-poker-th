@@ -259,14 +259,39 @@ class ImprovedCardDetector:
         except Exception as e:
             logger.error(f"Error parsing prediction: {str(e)}")
             return None, None
-    
+
+    def _save_normalized_debug_image(self, normalized_img, img_batch):
+        """Save normalized image used for neural network input for debugging"""
+        try:
+            # Create unique filename based on processed count
+            filename = f"card_{self.processed_count:04d}"
+            
+            # Convert normalized image back to uint8 for saving (scale back to 0-255)
+            normalized_for_save = (normalized_img * 255).astype(np.uint8)
+            
+            # Save the normalized RGB image
+            normalized_path = os.path.join(self.debug_dir, f"{filename}_normalized.png")
+            
+            # OpenCV expects BGR for saving, so convert from RGB
+            normalized_for_save_bgr = cv2.cvtColor(normalized_for_save, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(normalized_path, normalized_for_save_bgr)
+            
+            # Also save the exact batch input (first item from batch) as a numpy array
+            # This is the exact data fed to the neural network
+            batch_path = os.path.join(self.debug_dir, f"{filename}_batch_input.npy")
+            np.save(batch_path, img_batch[0])
+            
+            logger.info(f"Saved normalized debug image for card {self.processed_count} to {normalized_path}")
+        except Exception as e:
+            logger.error(f"Error saving normalized debug image: {str(e)}")
+
     def detect_card(self, card_img):
         """
         Detect card value and suit using neural network with OpenCV fallback
         
         Args:
             card_img: Image of a card (in BGR format from OpenCV)
-                
+                    
         Returns:
             tuple: (value, suit) or default values if detection fails
         """
@@ -286,19 +311,61 @@ class ImprovedCardDetector:
             # Try neural network prediction first if model is available
             if self.model is not None:
                 try:
-                    # Preprocess the image - use original image, not one with debug overlays
-                    processed_img = self._preprocess_image(card_img.copy())
-                    if processed_img is not None:
-                        # Make prediction
-                        prediction = self.model.predict(processed_img, verbose=0)
+                    # Make a clean copy of the image
+                    img = card_img.copy()
+                    
+                    # Resize the image to target size for the model
+                    resized_img = cv2.resize(img, ( self.img_height, self.img_width))
+                    
+                    # Convert from BGR (OpenCV) to RGB (what most models expect)
+                    if len(resized_img.shape) == 3 and resized_img.shape[2] == 3:
+                        rgb_img = cv2.cvtColor(resized_img, cv2.COLOR_BGR2RGB)
+                    else:
+                        # If grayscale, convert to RGB
+                        rgb_img = cv2.cvtColor(resized_img, cv2.COLOR_GRAY2RGB)
+                    
+                    # Normalize pixel values to [0,1]
+                    normalized_img = rgb_img.astype(np.float32) / 255.0
+                    
+                    # Add batch dimension
+                    img_batch = np.expand_dims(normalized_img, axis=0)
+                    
+                    # Save normalized image for debugging
+                    if self.save_debug_images:
+                        self._save_normalized_debug_image(normalized_img, img_batch)
+                    
+                    # Make prediction
+                    prediction = self.model.predict(img_batch, verbose=1)
+                    
+                    # Get the class with highest probability
+                    predicted_class_idx = np.argmax(prediction[0])
+                    confidence = float(prediction[0][predicted_class_idx])
+                    
+                    # If confidence is too low, fall back to traditional methods
+                    if confidence < 0.5:  # Confidence threshold
+                        logger.warning(f"Low confidence prediction: {confidence:.2f}")
+                    else:
+                        # If we have access to class names from the model, use them
+                        if hasattr(self.model, 'class_names'):
+                            class_name = self.model.class_names[predicted_class_idx]
+                        # Otherwise use our predefined mapping
+                        elif predicted_class_idx in self.class_mapping:
+                            class_name = self.class_mapping[predicted_class_idx]
+                        else:
+                            logger.warning(f"Unknown class index: {predicted_class_idx}")
+                            # Fall back to traditional methods
+                            pass
                         
-                        
-
-                        # Parse the prediction
-                        value, suit = self._parse_prediction(prediction)
-                        
-                        # If prediction is valid, return it
-                        if value is not None and suit is not None:
+                        # Parse the card value and suit from the class name
+                        if '_of_' in class_name:
+                            value, suit = class_name.split('_of_')
+                            # Convert value to standard format
+                            value = value.upper() if value in ['j', 'q', 'k', 'a'] else value
+                            
+                            # Log the successful prediction
+                            if self.debug_mode:
+                                logger.info(f"Predicted {value} of {suit} with confidence {confidence:.2f}")
+                            
                             # Cache the result
                             self._detection_cache[card_hash] = (value, suit)
                             return value, suit
@@ -356,7 +423,7 @@ class ImprovedCardDetector:
         except Exception as e:
             logger.error(f"Error detecting card: {str(e)}")
             return '?', '?'
-    
+     
     def _calculate_red_percentage(self, img):
         """Calculate percentage of red pixels in the image"""
         try:
