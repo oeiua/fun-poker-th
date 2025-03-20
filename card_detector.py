@@ -63,7 +63,7 @@ class ImprovedCardDetector:
         self._detection_cache = {}
 
         # Target size for the neural network model
-        self.img_height, self.img_width = 20, 50
+        self.img_height, self.img_width = 50, 20
 
         # Define class mapping for model predictions
         self.class_mapping = self._create_class_mapping()
