@@ -8,6 +8,9 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Rescaling
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import Callback
+from tensorflow.keras import backend as K
+import math
 
 # Force CPU usage
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
@@ -48,42 +51,58 @@ train_dir = 'dataset/train'
 validation_dir = 'dataset/validation'
 model_save_path = 'card_model.h5'
 
+EPOCHS = 50
+INITIAL_LR = 1e-3
+BATCH_SIZE = 32
+
 # Set image dimensions and increase batch size for better CPU utilization
 img_height, img_width = 50, 20
-batch_size = 16  # Increased from 8 to better utilize CPU cores
+batch_size = BATCH_SIZE  # Increased from 8 to better utilize CPU cores
 
-def aspect_ratio_transformer(image):
-    """
-    Optimized version of aspect ratio transformer using numpy operations
-    where possible to reduce overhead.
-    """
-    # Convert to PIL Image for manipulation (assumes image is in [0,1] range from rescale)
-    img_array = (image * 255).astype(np.uint8)
-    img = Image.fromarray(img_array)
+def augment_face_cards(image):
+    contrast_factor = np.random.uniform(0.9, 1.1)
+    brightness_shift = np.random.uniform(-0.05, 0.05)
     
-    # Original dimensions
-    width, height = img.size
+    # Apply contrast adjustment
+    image = image * contrast_factor
+    # Apply brightness adjustment
+    image = image + brightness_shift
+    # Clip to valid range
+    image = np.clip(image, 0, 1.0)
+    
+    return image
 
-    img_resized = img.resize((height, width), Image.LANCZOS)
-
-    # Convert back to numpy array and rescale to [0, 1]
-    return np.array(img_resized) / 255.0
+def focal_loss(gamma=2.0, alpha=0.25):
+    def focal_loss_fn(y_true, y_pred):
+        # Clip to prevent NaN's and Inf's
+        y_pred = K.clip(y_pred, K.epsilon(), 1.0 - K.epsilon())
+        
+        # Calculate cross entropy
+        cross_entropy = -y_true * K.log(y_pred)
+        
+        # Calculate focal loss
+        loss = alpha * K.pow(1 - y_pred, gamma) * cross_entropy
+        
+        # Sum over classes
+        return K.sum(loss, axis=-1)
+    return focal_loss_fn
 
 # Data prefetching and buffering parameters
 AUTOTUNE = tf.data.AUTOTUNE
 
-# Data augmentation for training data
 train_datagen = ImageDataGenerator(
     rescale=1./255,
-    rotation_range=40,
-    shear_range=0.1,
+    rotation_range=10,
+    brightness_range=[0.8, 1.2],
+    shear_range=0.2,
     zoom_range=0.1,
-    horizontal_flip=False,
+    horizontal_flip=True,
     width_shift_range=[-1/20, 1/20],  
     height_shift_range=[-1/50, 1/50],
     fill_mode='nearest',
-    # preprocessing_function=aspect_ratio_transformer
+    preprocessing_function=lambda img: augment_face_cards(img)
 )
+
 
 # Only rescaling for validation data
 validation_datagen = ImageDataGenerator(rescale=1./255)
@@ -110,6 +129,27 @@ print(f"Number of classes: {num_classes}")
 # Ensure the model output matches the number of classes
 if num_classes != 52:
     raise ValueError(f"Expected 52 classes, but found {num_classes} classes in the dataset.")
+
+class CosineAnnealingWithWarmup(Callback):
+    def __init__(self, total_epochs, warmup_epochs=5, base_lr=1e-3, min_lr=1e-6):
+        super().__init__()
+        self.total_epochs = total_epochs
+        self.warmup_epochs = warmup_epochs
+        self.base_lr = base_lr
+        self.min_lr = min_lr
+        
+    def on_epoch_begin(self, epoch, logs=None):
+        if epoch < self.warmup_epochs:
+            # Linear warmup
+            lr = self.min_lr + epoch * (self.base_lr - self.min_lr) / self.warmup_epochs
+        else:
+            # Cosine annealing after warmup
+            progress = (epoch - self.warmup_epochs) / (self.total_epochs - self.warmup_epochs)
+            cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
+            lr = self.min_lr + cosine_decay * (self.base_lr - self.min_lr)
+            
+        K.set_value(self.model.optimizer.learning_rate, lr)
+        print(f"\nEpoch {epoch+1}: Learning rate set to {lr:.6f}")
 
 # Function to save the model
 def save_model(model, path):
@@ -148,15 +188,20 @@ if model is None:
     ])
 
     # Use a lower learning rate for more stable CPU training
-    optimizer = Adam(learning_rate=0.01)
+    optimizer = Adam(learning_rate=0.0001)
     
     # Compile the model
+    # model.compile(
+    #     optimizer=optimizer, 
+    #     loss='categorical_crossentropy', 
+    #     metrics=['accuracy']
+    # )
+    
     model.compile(
-        optimizer=optimizer, 
-        loss='categorical_crossentropy', 
+        optimizer=Adam(learning_rate=INITIAL_LR),
+        loss=focal_loss(gamma=2.0),
         metrics=['accuracy']
     )
-
     # Print the model summary to understand the dimensions
     model.summary()
     
@@ -167,15 +212,22 @@ if model is None:
             model_save_path,
             monitor='val_accuracy',
             save_best_only=True,
-            verbose=1
+            verbose=1,
+            mode='max',
+        ),
+        CosineAnnealingWithWarmup(
+            total_epochs=EPOCHS,
+            warmup_epochs=3,
+            base_lr=INITIAL_LR,
+            min_lr=1e-6
         ),
         # Learning rate schedule
         ReduceLROnPlateau(
             monitor='val_loss',
             factor=0.5,
-            patience=100,
+            patience=5000,
             min_lr=1e-6,
-            verbose=1
+            verbose=0
         )
     ]
 
@@ -189,7 +241,7 @@ if model is None:
         steps_per_epoch=steps_per_epoch,
         validation_data=validation_generator,
         validation_steps=validation_steps,
-        epochs=100000,  # Increased epochs to allow proper learning
+        epochs=EPOCHS,  # Increased epochs to allow proper learning
         callbacks=callbacks,
         verbose=1  # Show progress bar
     )
@@ -213,6 +265,21 @@ def predict_image(image_path, model):
 
 # Example usage
 if __name__ == "__main__":
+    print(f'TF version: {tf.__version__}')
+    
     image_path = 'card_0001_normalized.png'  # Replace with your test image path
     prediction = predict_image(image_path, model)
     print(f'Predicted card: {prediction}')
+    
+    image_path = 'card_0002_normalized.png'  # Replace with your test image path
+    prediction = predict_image(image_path, model)
+    print(f'Predicted card: {prediction}')
+    
+    image_path = 'card_0002_original.png'  # Replace with your test image path
+    prediction = predict_image(image_path, model)
+    print(f'Predicted card: {prediction}')
+    
+    image_path = 'card_0002_rgb.png'  # Replace with your test image path
+    prediction = predict_image(image_path, model)
+    print(f'Predicted card: {prediction}')
+    
