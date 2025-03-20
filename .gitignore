@@ -7,6 +7,7 @@ logs/
 poker_data/
 card_templates/
 card_templates*/
+dataset/
 *.h5
 # C extensions
 *.so

@@ -236,7 +236,7 @@ class OptimizedPokerAnalyzer:
                 if self.logger.isEnabledFor(logging.DEBUG):
                     self.logger.debug(f"Detected card: {value} of {suit}")
         except Exception as e:
-            logger.error(f"Error extracting card: {str(e)}")
+            self.logger.error(f"Error extracting card: {str(e)}")
 
     def _is_valid_region(self, region, img_shape):
         """
