@@ -87,6 +87,13 @@ class ImprovedCardDetector:
                     f"Card detection model loaded from {self.model_path} in {load_time:.2f} seconds"
                 )
 
+                test_input = np.zeros((1, self.img_height, self.img_width, 3), dtype=np.float32)
+                try:
+                    test_output = self.model.predict(test_input, verbose=0)
+                    logger.info(f"Model test successful. Output shape: {test_output[0].shape}")
+                except Exception as e:
+                    logger.error(f"Model test failed: {str(e)}")
+
                 # Warm up the model with a dummy prediction
                 dummy_input = np.zeros(
                     (1, self.img_height, self.img_width, 3), dtype=np.float32
@@ -201,7 +208,9 @@ class ImprovedCardDetector:
 
             # Normalize pixel values to [0, 1]
             normalized_img = rgb_img.astype(np.float32) / 255.0
-
+            
+            logger.info(f"Normalized image stats: min={normalized_img.min():.4f}, max={normalized_img.max():.4f}, mean={normalized_img.mean():.4f}")
+            
             # Add batch dimension
             return np.expand_dims(normalized_img, axis=0)
         except Exception as e:
@@ -244,7 +253,9 @@ class ImprovedCardDetector:
         all_cards = []
         for value in self.card_values:
             for suit in self.card_suits:
-                card_name = f"{value.lower()}_of_{suit}"
+                # Make sure values are lowercase for face cards to match training
+                card_value = value.lower() if value in ["J", "Q", "K", "A"] else value
+                card_name = f"{card_value}_of_{suit}"
                 all_cards.append(card_name)
 
         # Add special cases if needed
@@ -253,7 +264,10 @@ class ImprovedCardDetector:
 
         # Create mapping dictionary
         class_mapping = {i: card_name for i, card_name in enumerate(all_cards)}
-
+        
+        if self.debug_mode:
+            logger.info(f"First 5 classes: {list(class_mapping.items())[:5]}") 
+            
         if self.debug_mode:
             logger.info(f"Created class mapping with {len(class_mapping)} classes")
 
@@ -265,6 +279,12 @@ class ImprovedCardDetector:
             # Get the class with highest probability
             predicted_class_idx = np.argmax(prediction[0])
             confidence = float(prediction[0][predicted_class_idx])
+            logger.info(f"Prediction details: Top class index: {predicted_class_idx}, Confidence: {confidence:.4f}")
+            logger.info(f"Top 3 predictions: {np.argsort(prediction[0])[-3:][::-1]} with values {prediction[0][np.argsort(prediction[0])[-3:][::-1]]}")
+        
+            # Also log the class name being generated
+            if predicted_class_idx in self.class_mapping:
+                logger.info(f"Class name: {self.class_mapping[predicted_class_idx]}")
 
             # If confidence is too low, return None
             # Lower the threshold to 0.3 to increase chance of using neural network prediction
@@ -373,13 +393,18 @@ class ImprovedCardDetector:
 
                     # Normalize pixel values to [0,1]
                     normalized_img = rgb_img.astype(np.float32) / 255.0
-
+                    
+                    logger.info(f"Normalized image stats: min={normalized_img.min():.4f}, max={normalized_img.max():.4f}, mean={normalized_img.mean():.4f}")
+                    
                     # Add batch dimension
                     img_batch = np.expand_dims(normalized_img, axis=0)
 
                     # Save normalized image for debugging
                     if self.save_debug_images:
                         self._save_normalized_debug_image(normalized_img, img_batch)
+                        
+                    if self.debug_mode:
+                        logger.info(f"Image batch shape: {img_batch.shape}, Expected: (1, {self.img_height}, {self.img_width}, 3)")
 
                     # Make prediction - reduced verbosity
                     prediction = self.model.predict(img_batch, verbose=1)
