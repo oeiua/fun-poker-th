@@ -10,17 +10,17 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("CardDetector")
 
 try:
-    import pytesseract
-    TESSERACT_AVAILABLE = True
+    import easyocr
+    EASYOCR_AVAILABLE = True
+    logger.info("EasyOCR successfully imported")
 except ImportError:
-    TESSERACT_AVAILABLE = False
-    logger.warning("pytesseract not installed. Install with: pip install pytesseract")
-    logger.warning("You also need to install Tesseract OCR: https://github.com/tesseract-ocr/tesseract")
+    EASYOCR_AVAILABLE = False
+    logger.warning("easyocr not installed. Install with: pip install easyocr")
 
 
 class ImprovedCardDetector:
     """
-    Computer vision-based card detector for poker games
+    Computer vision-based card detector for poker games using EasyOCR for text recognition
     """
 
     def __init__(
@@ -54,6 +54,19 @@ class ImprovedCardDetector:
 
         # Counter for processed images
         self.processed_count = 0
+        
+        # Initialize EasyOCR reader
+        if EASYOCR_AVAILABLE:
+            try:
+                # Initialize with English language and no GPU by default
+                # Can be configured to use GPU if available
+                self.reader = easyocr.Reader(['en'], gpu=False)
+                logger.info("EasyOCR reader initialized successfully")
+            except Exception as e:
+                logger.error(f"Error initializing EasyOCR: {str(e)}")
+                self.reader = None
+        else:
+            self.reader = None
 
     def _compute_card_hash(self, card_img):
         """Compute a hash for a card image to use with caching"""
@@ -91,7 +104,7 @@ class ImprovedCardDetector:
 
     def detect_card(self, card_img):
         """
-        Detect card value and suit using Tesseract OCR for value and OpenCV for suit
+        Detect card value and suit using EasyOCR for value and OpenCV for suit
 
         Args:
             card_img: Image of a card (in BGR format from OpenCV)
@@ -160,7 +173,7 @@ class ImprovedCardDetector:
                 except Exception as e:
                     logger.error(f"Error saving debug regions: {str(e)}")
 
-            # STEP 3: Use Tesseract OCR to recognize card value
+            # STEP 3: Use EasyOCR to recognize card value
             ocr_value = self._recognize_card_value_with_ocr(value_region)
 
             # STEP 4: Calculate shape features for value and suit
@@ -195,7 +208,7 @@ class ImprovedCardDetector:
 
     def _recognize_card_value_with_ocr(self, value_region):
         """
-        Use Tesseract OCR to recognize card value with multiple preprocessing methods
+        Use EasyOCR to recognize card value with multiple preprocessing methods
 
         Args:
             value_region: Image of the card value region
@@ -203,12 +216,11 @@ class ImprovedCardDetector:
         Returns:
             str: Recognized card value or "?" if recognition fails
         """
-        if not TESSERACT_AVAILABLE:
+        if not EASYOCR_AVAILABLE or self.reader is None:
             return "?"
 
         try:
             gray = cv2.cvtColor(value_region, cv2.COLOR_BGR2GRAY)
-
             denoised_gray = gray
 
             # Try multiple preprocessing methods for better results
@@ -263,7 +275,7 @@ class ImprovedCardDetector:
                     ]
 
                     for method_name, scaled in methods:
-                        # Save scaled version sent to Tesseract
+                        # Save scaled version sent to OCR
                         scaled_path = os.path.join(
                             self.debug_dir, f"{filename}_ocr_{method_name}_scaled.png"
                         )
@@ -273,9 +285,7 @@ class ImprovedCardDetector:
                 except Exception as e:
                     logger.error(f"Error saving OCR debug images: {str(e)}")
 
-            custom_config = r"--psm 10 --oem 3 -c tessedit_char_whitelist=23456789TJQKA10"
-
-            # Try each preprocessed image
+            # Try each preprocessed image with EasyOCR
             for i, (method_name, scaled) in enumerate(
                 zip(
                     ["thresh1", "thresh2", "adaptive", "kernel"],
@@ -283,7 +293,25 @@ class ImprovedCardDetector:
                 )
             ):
                 try:
-                    text = pytesseract.image_to_string(scaled, config=custom_config).strip()
+                    # Convert grayscale to RGB for EasyOCR
+                    if len(scaled.shape) == 2:
+                        scaled_rgb = cv2.cvtColor(scaled, cv2.COLOR_GRAY2RGB)
+                    else:
+                        scaled_rgb = scaled
+                    
+                    # Use EasyOCR to detect text
+                    # allowlist restricts to card values only
+                    # detail=0 means return just the text
+                    ocr_result = self.reader.readtext(
+                        scaled_rgb, 
+                        allowlist='23456789TJQKA10', 
+                        detail=0,
+                        paragraph=False,
+                        min_size=10
+                    )
+                    
+                    # EasyOCR returns a list of detected text strings
+                    text = ''.join(ocr_result).strip() if ocr_result else ""
                     raw_text = text  # Keep the raw OCR output for debugging
                     text = self._normalize_card_value(text)
 
@@ -545,13 +573,13 @@ class ImprovedCardDetector:
         """Clear the detection cache"""
         self._detection_cache.clear()
 
+
 class EnhancedTextRecognition:
-    """Enhanced text recognition for chip counts and other poker text using Tesseract OCR"""
+    """Enhanced text recognition for chip counts and other poker text using EasyOCR"""
 
     def __init__(
         self,
         debug_mode=True,
-        tesseract_path=r"C:\Program Files\Tesseract-OCR\tesseract.exe",
     ):
         self.text_colors = ["white", "yellow", "green"]
         self.debug_mode = debug_mode
@@ -559,26 +587,19 @@ class EnhancedTextRecognition:
         # Results cache to avoid redundant processing
         self._cache = {}
 
-        # Set tesseract path if provided
-        if tesseract_path and TESSERACT_AVAILABLE:
-            pytesseract.pytesseract.tesseract_cmd = tesseract_path
-
-        # Default tesseract config for digits
-        self.tesseract_config = '--psm 7 -c tessedit_char_whitelist="0123456789$."'
-
-        # Test if tesseract is available and working
-        if TESSERACT_AVAILABLE:
+        # Initialize EasyOCR reader
+        if EASYOCR_AVAILABLE:
             try:
-                test_version = pytesseract.get_tesseract_version()
-                logger.info(f"Using Tesseract OCR version: {test_version}")
+                self.reader = easyocr.Reader(['en'], gpu=False)
+                logger.info("EasyOCR initialized successfully for text recognition")
+                self._easyocr_working = True
             except Exception as e:
-                logger.error(f"Tesseract installation error: {str(e)}")
-                logger.warning("Will use fallback methods for text recognition")
-                self._tesseract_working = False
-            else:
-                self._tesseract_working = True
+                logger.error(f"Error initializing EasyOCR: {str(e)}")
+                self.reader = None
+                self._easyocr_working = False
         else:
-            self._tesseract_working = False
+            self.reader = None
+            self._easyocr_working = False
 
     def _compute_region_hash(self, img, region):
         """Compute a hash for the region to use in caching"""
@@ -601,7 +622,7 @@ class EnhancedTextRecognition:
 
     def extract_chip_count(self, img, region):
         """
-        Extract chip count using Tesseract OCR with multiple preprocessing methods
+        Extract chip count using EasyOCR with multiple preprocessing methods
 
         Args:
             img: Source image
@@ -717,29 +738,42 @@ class EnhancedTextRecognition:
             _, thresh1 = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
             _, thresh2 = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
 
-            # Default values in case Tesseract is not available
+            # Default values in case EasyOCR is not available
             text1 = ""
             text2 = ""
 
-            if TESSERACT_AVAILABLE and self._tesseract_working:
+            if EASYOCR_AVAILABLE and self._easyocr_working and self.reader is not None:
                 # OCR on both thresholded images
                 try:
+                    # Convert grayscale to RGB for EasyOCR
+                    thresh1_rgb = cv2.cvtColor(thresh1, cv2.COLOR_GRAY2RGB)
+                    thresh2_rgb = cv2.cvtColor(thresh2, cv2.COLOR_GRAY2RGB)
+                    
                     # Try regular threshold first (white text on black)
-                    text1 = pytesseract.image_to_string(
-                        thresh1, config=self.tesseract_config
-                    ).strip()
-
+                    ocr_result1 = self.reader.readtext(
+                        thresh1_rgb, 
+                        allowlist='0123456789$ ', 
+                        detail=0,
+                        paragraph=False
+                    )
+                    text1 = ''.join(ocr_result1).strip() if ocr_result1 else ""
+                    
                     # Then try inverse threshold (black text on white)
-                    text2 = pytesseract.image_to_string(
-                        thresh2, config=self.tesseract_config
-                    ).strip()
+                    ocr_result2 = self.reader.readtext(
+                        thresh2_rgb, 
+                        allowlist='0123456789$ ', 
+                        detail=0,
+                        paragraph=False
+                    )
+                    text2 = ''.join(ocr_result2).strip() if ocr_result2 else ""
+                    
                 except Exception as e:
-                    logger.error(f"Tesseract OCR error: {str(e)}")
+                    logger.error(f"EasyOCR error: {str(e)}")
                     # Fallback to default values
                     text1 = "$" + str(np.random.randint(1000, 9999))
                     text2 = "$" + str(np.random.randint(1000, 9999))
             else:
-                # Tesseract not available, use simulated OCR
+                # EasyOCR not available, use simulated OCR
                 text1 = "$" + str(np.random.randint(1000, 9999))
                 text2 = "$" + str(np.random.randint(1000, 9999))
 
@@ -802,18 +836,26 @@ class EnhancedTextRecognition:
             # Default value
             text = ""
 
-            if TESSERACT_AVAILABLE and self._tesseract_working:
+            if EASYOCR_AVAILABLE and self._easyocr_working and self.reader is not None:
                 try:
+                    # Convert to RGB for EasyOCR
+                    thresh_rgb = cv2.cvtColor(thresh, cv2.COLOR_GRAY2RGB)
+                    
                     # Apply OCR to the color-filtered image
-                    text = pytesseract.image_to_string(
-                        thresh, config=self.tesseract_config
-                    ).strip()
+                    ocr_result = self.reader.readtext(
+                        thresh_rgb, 
+                        allowlist='0123456789$.', 
+                        detail=0,
+                        paragraph=False
+                    )
+                    text = ''.join(ocr_result).strip() if ocr_result else ""
+                    
                 except Exception as e:
-                    logger.error(f"Tesseract OCR error in color filter: {str(e)}")
+                    logger.error(f"EasyOCR error in color filter: {str(e)}")
                     # Fallback to simulated OCR
                     text = "$" + str(np.random.randint(1000, 9999))
             else:
-                # Tesseract not available, use simulated OCR
+                # EasyOCR not available, use simulated OCR
                 text = "$" + str(np.random.randint(1000, 9999))
 
             # Extract number
@@ -841,18 +883,26 @@ class EnhancedTextRecognition:
             # Default value
             text = ""
 
-            if TESSERACT_AVAILABLE and self._tesseract_working:
+            if EASYOCR_AVAILABLE and self._easyocr_working and self.reader is not None:
                 try:
+                    # Convert to RGB for EasyOCR
+                    adaptive_rgb = cv2.cvtColor(adaptive, cv2.COLOR_GRAY2RGB)
+                    
                     # Apply OCR to the adaptive thresholded image
-                    text = pytesseract.image_to_string(
-                        adaptive, config=self.tesseract_config
-                    ).strip()
+                    ocr_result = self.reader.readtext(
+                        adaptive_rgb, 
+                        allowlist='0123456789$.', 
+                        detail=0,
+                        paragraph=False
+                    )
+                    text = ''.join(ocr_result).strip() if ocr_result else ""
+                    
                 except Exception as e:
-                    logger.error(f"Tesseract OCR error in adaptive thresh: {str(e)}")
+                    logger.error(f"EasyOCR error in adaptive thresh: {str(e)}")
                     # Fallback to simulated OCR
                     text = "$" + str(np.random.randint(1000, 9999))
             else:
-                # Tesseract not available, use simulated OCR
+                # EasyOCR not available, use simulated OCR
                 text = "$" + str(np.random.randint(1000, 9999))
 
             # Extract number
@@ -879,24 +929,32 @@ class EnhancedTextRecognition:
             kernel = np.ones((3, 3), np.uint8)
             dilated = cv2.dilate(edges, kernel, iterations=1)
 
-            # Invert (Tesseract works better with black text on white background)
+            # Invert (OCR works better with black text on white background)
             inverted = cv2.bitwise_not(dilated)
 
             # Default value
             text = ""
 
-            if TESSERACT_AVAILABLE and self._tesseract_working:
+            if EASYOCR_AVAILABLE and self._easyocr_working and self.reader is not None:
                 try:
+                    # Convert to RGB for EasyOCR
+                    inverted_rgb = cv2.cvtColor(inverted, cv2.COLOR_GRAY2RGB)
+                    
                     # Apply OCR to the edge enhanced image
-                    text = pytesseract.image_to_string(
-                        inverted, config=self.tesseract_config
-                    ).strip()
+                    ocr_result = self.reader.readtext(
+                        inverted_rgb, 
+                        allowlist='0123456789$.', 
+                        detail=0,
+                        paragraph=False
+                    )
+                    text = ''.join(ocr_result).strip() if ocr_result else ""
+                    
                 except Exception as e:
-                    logger.error(f"Tesseract OCR error in edge enhanced: {str(e)}")
+                    logger.error(f"EasyOCR error in edge enhanced: {str(e)}")
                     # Fallback to simulated OCR
                     text = "$" + str(np.random.randint(1000, 9999))
             else:
-                # Tesseract not available, use simulated OCR
+                # EasyOCR not available, use simulated OCR
                 text = "$" + str(np.random.randint(1000, 9999))
 
             # Extract number
@@ -954,20 +1012,15 @@ class EnhancedTextRecognition:
         Args:
             img: Source image
             preprocessing: Preprocessing method ('basic', 'adaptive', 'edge')
-            whitelist: Character whitelist for Tesseract
+            whitelist: Character whitelist for OCR
 
         Returns:
             str: Recognized text
         """
-        if not TESSERACT_AVAILABLE or not self._tesseract_working:
-            return "Tesseract OCR not available"
+        if not EASYOCR_AVAILABLE or not self._easyocr_working or self.reader is None:
+            return "EasyOCR not available"
 
         try:
-            # Configure Tesseract
-            config = "--psm 7"  # Single line of text
-            if whitelist:
-                config += f' -c tessedit_char_whitelist="{whitelist}"'
-
             # Apply preprocessing
             if preprocessing == "basic":
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -985,9 +1038,29 @@ class EnhancedTextRecognition:
             else:
                 # Advanced preprocessing
                 processed = self._preprocess_for_ocr(img)
-
-            # Apply OCR
-            text = pytesseract.image_to_string(processed, config=config).strip()
+            
+            # Convert to RGB for EasyOCR
+            if len(processed.shape) == 2:
+                processed_rgb = cv2.cvtColor(processed, cv2.COLOR_GRAY2RGB)
+            else:
+                processed_rgb = processed
+            
+            # Apply OCR with whitelist if provided
+            if whitelist:
+                ocr_result = self.reader.readtext(
+                    processed_rgb, 
+                    allowlist=whitelist, 
+                    detail=0,
+                    paragraph=True
+                )
+            else:
+                ocr_result = self.reader.readtext(
+                    processed_rgb, 
+                    detail=0,
+                    paragraph=True
+                )
+            
+            text = ' '.join(ocr_result) if ocr_result else ""
             return text
 
         except Exception as e:
