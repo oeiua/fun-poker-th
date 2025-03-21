@@ -180,7 +180,7 @@ class ImprovedCardDetector:
 
     def detect_card(self, card_img):
         """
-        Detect card value and suit using OpenCV-based techniques
+        Detect card value and suit using Tesseract OCR for value and OpenCV for suit
         
         Args:
             card_img: Image of a card (in BGR format from OpenCV)
@@ -209,13 +209,11 @@ class ImprovedCardDetector:
             height, width = card_img.shape[:2]
 
             # Value is now the top 20x30 px of the ROI image
-            # Ensure we don't exceed image dimensions
             value_height = min(30, height)
             value_width = min(20, width)
             value_region = card_img[0:value_height, 0:value_width]
 
             # Suit is now the bottom 20x20 px of the ROI image
-            # Ensure we don't exceed image dimensions
             suit_height = min(20, height)
             suit_width = min(20, width)
             suit_region = card_img[max(0, height-suit_height):height, 0:suit_width]
@@ -251,26 +249,42 @@ class ImprovedCardDetector:
                 except Exception as e:
                     logger.error(f"Error saving debug regions: {str(e)}")
 
-            # STEP 3: Analyze shapes to determine value and suit
+            # STEP 3: Use Tesseract OCR to recognize card value
+            ocr_value = self._recognize_card_value_with_ocr(value_region)
+            
+            # STEP 4: Always calculate shape features for value and suit
             value_features = self._calculate_shape_features(value_region, not is_red)
             suit_features = self._calculate_shape_features(suit_region, not is_red)
-
-            # STEP 4: Create a feature signature that uniquely identifies this card
+            
+            # STEP 5: Create a feature signature (consistently using shape features)
             feature_key = f"{red_percent:.1f}|{value_features['aspect_ratio']:.2f}|{value_features['complexity']:.1f}"
-
-            # STEP 5: Check if we have a direct correction for this feature signature
+            
+            # STEP 6: Check if we have a direct correction for this feature signature
             if feature_key in self.corrections:
                 # Use the correction
                 value, suit = self.corrections[feature_key]
-
+                
                 # Cache the result
                 self._detection_cache[card_hash] = (value, suit)
+                
+                if self.debug_mode:
+                    logger.info(f"Using correction for feature key {feature_key}: {value} of {suit}")
+                
                 return value, suit
-
-            # STEP 6: Perform direct classification using shape features
-            value = self._classify_value(value_features, is_red)
+            
+            # STEP 7: Use OCR value if available, otherwise use shape-based classification
+            if ocr_value not in ["?", ""]:
+                value = ocr_value
+                if self.debug_mode:
+                    logger.info(f"Using OCR detected value: {value}")
+            else:
+                # Fall back to shape-based classification
+                value = self._classify_value(value_features, is_red)
+                if self.debug_mode:
+                    logger.info(f"OCR failed, using shape-based value detection: {value}")
+            
+            # STEP 8: Use shape-based classification for suit
             suit = self._classify_suit(suit_features, is_red)
-
 
             # Cache the result
             self._detection_cache[card_hash] = (value, suit)
@@ -283,6 +297,153 @@ class ImprovedCardDetector:
         except Exception as e:
             logger.error(f"Error detecting card: {str(e)}")
             return "?", "?"
+
+    def _recognize_card_value_with_ocr(self, value_region):
+        """
+        Use Tesseract OCR to recognize card value with multiple preprocessing methods
+        
+        Args:
+            value_region: Image of the card value region
+            
+        Returns:
+            str: Recognized card value or "?" if recognition fails
+        """
+        if not TESSERACT_AVAILABLE:
+            return "?"
+        
+        try:
+            # Try multiple preprocessing methods for better results
+            results = []
+            
+            # Method 1: Basic thresholding
+            gray = cv2.cvtColor(value_region, cv2.COLOR_BGR2GRAY)
+            _, thresh1 = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+            scaled1 = cv2.resize(thresh1, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+            
+            # Method 2: Inverse thresholding
+            _, thresh2 = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
+            scaled2 = cv2.resize(thresh2, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+            
+            # Method 3: Adaptive thresholding
+            adaptive = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                            cv2.THRESH_BINARY, 11, 2)
+            scaled3 = cv2.resize(adaptive, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+            
+            # Save debug images if enabled
+            if self.debug_mode and self.save_debug_images and self.processed_count > 0:
+                try:
+                    filename = f"card_{self.processed_count:04d}"
+                    
+                    # Save original grayscale
+                    gray_path = os.path.join(self.debug_dir, f"{filename}_ocr_gray.png")
+                    cv2.imwrite(gray_path, gray)
+                    
+                    # Save all preprocessing methods
+                    methods = [
+                        ("binary", thresh1, scaled1),
+                        ("inverse", thresh2, scaled2),
+                        ("adaptive", adaptive, scaled3)
+                    ]
+                    
+                    for method_name, original, scaled in methods:
+                        # Save original threshold
+                        thresh_path = os.path.join(self.debug_dir, f"{filename}_ocr_{method_name}.png")
+                        cv2.imwrite(thresh_path, original)
+                        
+                        # Save scaled version sent to Tesseract
+                        scaled_path = os.path.join(self.debug_dir, f"{filename}_ocr_{method_name}_scaled.png")
+                        cv2.imwrite(scaled_path, scaled)
+                    
+                    logger.info(f"Saved OCR debug images for card {self.processed_count}")
+                except Exception as e:
+                    logger.error(f"Error saving OCR debug images: {str(e)}")
+            
+            # Define our OCR configuration
+            # custom_config = r'--psm 10 --oem 3 -c tessedit_char_whitelist=23456789TJQKA10'
+            custom_config = '--psm 10 --oem 1 -c tessedit_char_whitelist=23456789TJQKA10 -c textord_min_xheight=25'
+            
+            # Try each preprocessed image
+            for i, (method_name, scaled) in enumerate(zip(["binary", "inverse", "adaptive"], [scaled1, scaled2, scaled3])):
+                try:
+                    text = pytesseract.image_to_string(scaled, config=custom_config).strip()
+                    raw_text = text  # Keep the raw OCR output for debugging
+                    text = self._normalize_card_value(text)
+                    
+                    if self.debug_mode:
+                        logger.debug(f"OCR method {i+1} ({method_name}): Raw='{raw_text}' Normalized='{text}'")
+                    
+                    if text != "?":
+                        results.append(text)
+                except Exception as e:
+                    if self.debug_mode:
+                        logger.debug(f"OCR error with method {i+1} ({method_name}): {str(e)}")
+                    continue
+            
+            # If we got any valid results, use the most common one
+            if results:
+                from collections import Counter
+                value_counts = Counter(results)
+                most_common_value = value_counts.most_common(1)[0][0]
+                if self.debug_mode:
+                    logger.debug(f"Most common OCR result: '{most_common_value}' (counts: {dict(value_counts)})")
+                return most_common_value
+            
+            if self.debug_mode:
+                logger.debug(f"OCR failed to detect any valid card value")
+            return "?"
+            
+        except Exception as e:
+            logger.error(f"Error during OCR card value recognition: {str(e)}")
+            return "?"
+
+   
+    def _normalize_card_value(self, text):
+        """
+        Normalize OCR result to standard card values
+        
+        Args:
+            text: Raw OCR text
+            
+        Returns:
+            str: Normalized card value or "?" if invalid
+        """
+        if not text:
+            return "?"
+        
+        # Convert to uppercase and remove spaces
+        text = text.upper().replace(' ', '')
+        
+        # Map common OCR errors
+        value_map = {
+            '1': '10',    # Sometimes OCR might misread '10' as '1'
+            'I': '1',
+            'T': '10',
+            'O': 'Q',     # OCR might confuse 'Q' with 'O'
+            'D': 'Q',     # OCR might confuse 'Q' with 'D'
+            '0': '10',    # OCR might confuse '10' with '0'
+            'l': '1',     # OCR might confuse '1' with 'l'
+            'L': '1'      # OCR might confuse '1' with 'L'
+        }
+        
+        # Apply value mapping
+        if text in value_map:
+            text = value_map[text]
+        
+        # Handle special case for '10'
+        if text.startswith('1') and len(text) > 1:
+            if text[1] == '0' or text[1] == 'O' or text[1] == 'o':
+                return '10'
+        
+        # Validate the result
+        valid_values = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
+        if text in valid_values:
+            return text
+        
+        # Try to extract just the first character if it's valid
+        if text and text[0] in 'JQKA23456789':
+            return text[0]
+        
+        return "?"
 
     def _calculate_red_percentage(self, img):
         """Calculate percentage of red pixels in the image"""
