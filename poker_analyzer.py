@@ -18,7 +18,7 @@ class OptimizedPokerAnalyzer:
     """Analyze poker screenshots with optimized performance and accuracy"""
     
     def __init__(self, template_dir="card_templates", model_path="card_model.h5"):
-        self.card_detector = ImprovedCardDetector(model_path=model_path, template_dir=template_dir)
+        self.card_detector = ImprovedCardDetector(template_dir=template_dir)
         self.card_detector.debug_mode = True
 
         self.text_recognizer = EnhancedTextRecognition()

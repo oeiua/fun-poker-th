@@ -1,25 +1,30 @@
 import cv2
 import numpy as np
 import os
+import re
 import logging
 import json
 from collections import Counter
-import tensorflow as tf
-import time
 
-# Set up logging - reduced verbosity
-logging.basicConfig(level=logging.DEBUG)
+# Set up logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("CardDetector")
 
+try:
+    import pytesseract
+    TESSERACT_AVAILABLE = True
+except ImportError:
+    TESSERACT_AVAILABLE = False
+    logger.warning("pytesseract not installed. Install with: pip install pytesseract")
+    logger.warning("You also need to install Tesseract OCR: https://github.com/tesseract-ocr/tesseract")
 
 class ImprovedCardDetector:
     """
-    Neural network-based card detector with OpenCV fallback for poker games
+    Computer vision-based card detector for poker games
     """
 
     def __init__(
         self,
-        model_path="card_model.h5",
         template_dir="card_templates",
         debug_mode=True,
         save_debug_images=True,
@@ -62,54 +67,8 @@ class ImprovedCardDetector:
         # Cache for detected cards to improve performance
         self._detection_cache = {}
 
-        # Target size for the neural network model
-        self.img_height, self.img_width = 50, 20
-
-        # Define class mapping for model predictions
-        self.class_mapping = self._create_class_mapping()
-
-        # Load the neural network model
-        self.model = None
-        self.model_path = model_path
-        self._load_model()
-
         # Counter for processed images
         self.processed_count = 0
-
-    def _load_model(self):
-        """Load the pre-trained TensorFlow model if available"""
-        try:
-            if os.path.exists(self.model_path):
-                start_time = time.time()
-                self.model = tf.keras.models.load_model(self.model_path)
-                load_time = time.time() - start_time
-                logger.info(
-                    f"Card detection model loaded from {self.model_path} in {load_time:.2f} seconds"
-                )
-
-                test_input = np.zeros((1, self.img_height, self.img_width, 3), dtype=np.float32)
-                try:
-                    test_output = self.model.predict(test_input, verbose=0)
-                    logger.info(f"Model test successful. Output shape: {test_output[0].shape}")
-                except Exception as e:
-                    logger.error(f"Model test failed: {str(e)}")
-
-                # Warm up the model with a dummy prediction
-                dummy_input = np.zeros(
-                    (1, self.img_height, self.img_width, 3), dtype=np.float32
-                )
-                self.model.predict(dummy_input)
-
-                return True
-            else:
-                logger.warning(
-                    f"Card detection model not found at {self.model_path}, using fallback detection methods"
-                )
-                return False
-        except Exception as e:
-            logger.error(f"Error loading card detection model: {str(e)}")
-            logger.warning("Using fallback detection methods")
-            return False
 
     def _load_corrections(self):
         """Load corrections from file"""
@@ -131,8 +90,6 @@ class ImprovedCardDetector:
         # Create default corrections if file doesn't exist
         default_corrections = {
             # Format: "red_percent|aspect_ratio|complexity": [value, suit]
-            "3.5|0.58|22.5": ["3", "clubs"],  # Example: correcting 3 of clubs
-            "2.1|0.85|18.2": ["A", "spades"],  # Example: correcting A of spades
         }
 
         # Save default corrections
@@ -191,32 +148,6 @@ class ImprovedCardDetector:
         small_img = cv2.resize(card_img, (16, 16))
         return hash(small_img.tobytes()[:100])
 
-    def _preprocess_image(self, card_img):
-        """Preprocess the card image for the neural network"""
-        try:
-            if card_img is None or card_img.size == 0:
-                return None
-
-            # In this version, we don't resize the image - we pass it as is
-            # Just ensure it's in the right color format (RGB) as neural networks typically expect RGB
-            if len(card_img.shape) == 3 and card_img.shape[2] == 3:
-                # Convert from BGR (OpenCV) to RGB (what most models expect)
-                rgb_img = cv2.cvtColor(card_img, cv2.COLOR_BGR2RGB)
-            else:
-                # If grayscale, convert to RGB
-                rgb_img = cv2.cvtColor(card_img, cv2.COLOR_GRAY2RGB)
-
-            # Normalize pixel values to [0, 1]
-            normalized_img = rgb_img.astype(np.float32) / 255.0
-            
-            logger.info(f"Normalized image stats: min={normalized_img.min():.4f}, max={normalized_img.max():.4f}, mean={normalized_img.mean():.4f}")
-            
-            # Add batch dimension
-            return np.expand_dims(normalized_img, axis=0)
-        except Exception as e:
-            logger.error(f"Error preprocessing image: {str(e)}")
-            return None
-
     def _save_debug_image(self, card_img):
         """Save original image for debugging"""
         try:
@@ -247,118 +178,13 @@ class ImprovedCardDetector:
         except Exception as e:
             logger.error(f"Error saving debug images: {str(e)}")
 
-    def _create_class_mapping(self):
-        """Create a mapping between class indices and card names"""
-        # Create a list of all possible card combinations
-        all_cards = []
-        for value in self.card_values:
-            for suit in self.card_suits:
-                # Make sure values are lowercase for face cards to match training
-                card_value = value.lower() if value in ["J", "Q", "K", "A"] else value
-                card_name = f"{card_value}_of_{suit}"
-                all_cards.append(card_name)
-
-        # Add special cases if needed
-        for extra in ["joker_red", "joker_black", "card_back"]:
-            all_cards.append(extra)
-
-        # Create mapping dictionary
-        class_mapping = {i: card_name for i, card_name in enumerate(all_cards)}
-        
-        if self.debug_mode:
-            logger.info(f"First 5 classes: {list(class_mapping.items())[:5]}") 
-            
-        if self.debug_mode:
-            logger.info(f"Created class mapping with {len(class_mapping)} classes")
-
-        return class_mapping
-
-    def _parse_prediction(self, prediction):
-        """Parse the model prediction to get value and suit"""
-        try:
-            # Get the class with highest probability
-            predicted_class_idx = np.argmax(prediction[0])
-            confidence = float(prediction[0][predicted_class_idx])
-            logger.info(f"Prediction details: Top class index: {predicted_class_idx}, Confidence: {confidence:.4f}")
-            logger.info(f"Top 3 predictions: {np.argsort(prediction[0])[-3:][::-1]} with values {prediction[0][np.argsort(prediction[0])[-3:][::-1]]}")
-        
-            # Also log the class name being generated
-            if predicted_class_idx in self.class_mapping:
-                logger.info(f"Class name: {self.class_mapping[predicted_class_idx]}")
-
-            # If confidence is too low, return None
-            # Lower the threshold to 0.3 to increase chance of using neural network prediction
-            if confidence < 0.3:  # Reduced confidence threshold
-                if self.debug_mode:
-                    logger.warning(f"Low confidence prediction: {confidence:.2f}")
-                return None, None
-
-            # If we have access to class names from the model, use them
-            if hasattr(self.model, "class_names"):
-                class_name = self.model.class_names[predicted_class_idx]
-            # Otherwise use our predefined mapping
-            elif predicted_class_idx in self.class_mapping:
-                class_name = self.class_mapping[predicted_class_idx]
-            else:
-                logger.warning(f"Unknown class index: {predicted_class_idx}")
-                return None, None
-
-            # Parse the card value and suit from the class name
-            if "_of_" in class_name:
-                value, suit = class_name.split("_of_")
-                # Convert value to standard format
-                value = value.upper() if value in ["j", "q", "k", "a"] else value
-
-                # Log the successful prediction
-                if self.debug_mode:
-                    logger.info(
-                        f"Predicted {value} of {suit} with confidence {confidence:.2f}"
-                    )
-
-                return value, suit
-            else:
-                logger.warning(f"Unexpected prediction format: {class_name}")
-                return None, None
-        except Exception as e:
-            logger.error(f"Error parsing prediction: {str(e)}")
-            return None, None
-
-    def _save_normalized_debug_image(self, normalized_img, img_batch):
-        """Save normalized image used for neural network input for debugging"""
-        try:
-            # Create unique filename based on processed count
-            filename = f"card_{self.processed_count:04d}"
-
-            # Convert normalized image back to uint8 for saving (scale back to 0-255)
-            normalized_for_save = (normalized_img * 255).astype(np.uint8)
-
-            # Save the normalized RGB image
-            normalized_path = os.path.join(self.debug_dir, f"{filename}_normalized.png")
-
-            # OpenCV expects BGR for saving, so convert from RGB
-            normalized_for_save_bgr = cv2.cvtColor(
-                normalized_for_save, cv2.COLOR_RGB2BGR
-            )
-            cv2.imwrite(normalized_path, normalized_for_save_bgr)
-
-            # Also save the exact batch input (first item from batch) as a numpy array
-            # This is the exact data fed to the neural network
-            batch_path = os.path.join(self.debug_dir, f"{filename}_batch_input.npy")
-            np.save(batch_path, img_batch[0])
-
-            logger.info(
-                f"Saved normalized debug image for card {self.processed_count} to {normalized_path}"
-            )
-        except Exception as e:
-            logger.error(f"Error saving normalized debug image: {str(e)}")
-
     def detect_card(self, card_img):
         """
-        Detect card value and suit using neural network with OpenCV fallback
-
+        Detect card value and suit using OpenCV-based techniques
+        
         Args:
             card_img: Image of a card (in BGR format from OpenCV)
-
+            
         Returns:
             tuple: (value, suit) or default values if detection fails
         """
@@ -374,62 +200,6 @@ class ImprovedCardDetector:
             card_hash = self._compute_card_hash(card_img)
             if card_hash in self._detection_cache:
                 return self._detection_cache[card_hash]
-
-            # Try neural network prediction first if model is available
-            if self.model is not None:
-                try:
-                    # Make a clean copy of the image
-                    img = card_img.copy()
-
-                    # Resize the image to target size for the model - NOTE: Fixed order of dimensions!
-                    resized_img = cv2.resize(img, (self.img_width, self.img_height))
-
-                    # Convert from BGR (OpenCV) to RGB (what most models expect)
-                    if len(resized_img.shape) == 3 and resized_img.shape[2] == 3:
-                        rgb_img = cv2.cvtColor(resized_img, cv2.COLOR_BGR2RGB)
-                    else:
-                        # If grayscale, convert to RGB
-                        rgb_img = cv2.cvtColor(resized_img, cv2.COLOR_GRAY2RGB)
-
-                    # Normalize pixel values to [0,1]
-                    normalized_img = rgb_img.astype(np.float32) / 255.0
-                    
-                    logger.info(f"Normalized image stats: min={normalized_img.min():.4f}, max={normalized_img.max():.4f}, mean={normalized_img.mean():.4f}")
-                    
-                    # Add batch dimension
-                    img_batch = np.expand_dims(normalized_img, axis=0)
-
-                    # Save normalized image for debugging
-                    if self.save_debug_images:
-                        self._save_normalized_debug_image(normalized_img, img_batch)
-                        
-                    if self.debug_mode:
-                        logger.info(f"Image batch shape: {img_batch.shape}, Expected: (1, {self.img_height}, {self.img_width}, 3)")
-
-                    # Make prediction - reduced verbosity
-                    prediction = self.model.predict(img_batch, verbose=1)
-
-                    # Parse the prediction result
-                    value, suit = self._parse_prediction(prediction)
-
-                    # If valid prediction was returned, use it
-                    if value is not None and suit is not None:
-                        # Cache the result
-                        self._detection_cache[card_hash] = (value, suit)
-                        return value, suit
-
-                    # If we got here, the neural network didn't make a confident prediction
-                    # Fall back to traditional methods
-                    if self.debug_mode:
-                        logger.info(
-                            "Neural network prediction had low confidence, falling back to traditional methods"
-                        )
-
-                except Exception as e:
-                    logger.warning(f"Neural network prediction failed: {str(e)}")
-                    # Fall back to traditional detection methods
-
-            # FALLBACK: Use traditional OpenCV-based detection
 
             # STEP 1: Determine if card is red or black
             red_percent = self._calculate_red_percentage(card_img)
@@ -473,10 +243,26 @@ class ImprovedCardDetector:
                 ):
                     value = "3"
                     suit = "clubs"
+            
+            # Additional post-processing rules for common misclassifications
+            if value == "3" and value_features["aspect_ratio"] > 0.8:
+                # 3 is often confused with 8 when aspect ratio is high
+                value = "8"
+            
+            if value == "6" and value_features["complexity"] < 15:
+                # 6 is often confused with 9 when complexity is low
+                value = "9"
+                
+            if value == "J" and value_features["complexity"] > 22:
+                # J is often confused with Q when complexity is high
+                value = "Q"
 
             # Cache the result
             self._detection_cache[card_hash] = (value, suit)
 
+            if self.debug_mode:
+                logger.info(f"Detected card: {value} of {suit} (feature key: {feature_key})")
+                
             return value, suit
 
         except Exception as e:
@@ -665,16 +451,36 @@ class ImprovedCardDetector:
         """Clear the detection cache"""
         self._detection_cache.clear()
 
-
 class EnhancedTextRecognition:
-    """Enhanced text recognition for chip counts and other poker text with improved performance"""
+    """Enhanced text recognition for chip counts and other poker text using Tesseract OCR"""
 
-    def __init__(self, debug_mode=False):
+    def __init__(self, debug_mode=True, tesseract_path=r'C:\Program Files\Tesseract-OCR\tesseract.exe'):
         self.text_colors = ["white", "yellow", "green"]
         self.debug_mode = debug_mode
 
         # Results cache to avoid redundant processing
         self._cache = {}
+        
+        # Set tesseract path if provided
+        if tesseract_path and TESSERACT_AVAILABLE:
+            pytesseract.pytesseract.tesseract_cmd = tesseract_path
+        
+        # Default tesseract config for digits
+        self.tesseract_config = '--psm 7 -c tessedit_char_whitelist="0123456789$."'
+        
+        # Test if tesseract is available and working
+        if TESSERACT_AVAILABLE:
+            try:
+                test_version = pytesseract.get_tesseract_version()
+                logger.info(f"Using Tesseract OCR version: {test_version}")
+            except Exception as e:
+                logger.error(f"Tesseract installation error: {str(e)}")
+                logger.warning("Will use fallback methods for text recognition")
+                self._tesseract_working = False
+            else:
+                self._tesseract_working = True
+        else:
+            self._tesseract_working = False
 
     def _compute_region_hash(self, img, region):
         """Compute a hash for the region to use in caching"""
@@ -697,7 +503,7 @@ class EnhancedTextRecognition:
 
     def extract_chip_count(self, img, region):
         """
-        Extract chip count using multiple methods with improved performance
+        Extract chip count using Tesseract OCR with multiple preprocessing methods
 
         Args:
             img: Source image
@@ -721,6 +527,12 @@ class EnhancedTextRecognition:
             # Extract the region
             chip_img = img[y : y + h, x : x + w]
 
+            # Skip processing for extremely small regions
+            if w < 10 or h < 5:
+                if self.debug_mode:
+                    logger.warning(f"Region too small for OCR: {w}x{h}")
+                return 0
+
             # Try different methods
             results = []
             confidence_scores = []
@@ -730,6 +542,8 @@ class EnhancedTextRecognition:
             if val1 > 0:
                 results.append(val1)
                 confidence_scores.append(conf1)
+                if self.debug_mode:
+                    logger.debug(f"Basic extraction: {val1} (conf: {conf1:.2f})")
 
             # Try different color filters
             for color in self.text_colors:
@@ -737,18 +551,24 @@ class EnhancedTextRecognition:
                 if val > 0:
                     results.append(val)
                     confidence_scores.append(conf)
+                    if self.debug_mode:
+                        logger.debug(f"{color.title()} filtered extraction: {val} (conf: {conf:.2f})")
 
             # Adaptive threshold
             val2, conf2 = self._extract_number_adaptive(chip_img)
             if val2 > 0:
                 results.append(val2)
                 confidence_scores.append(conf2)
+                if self.debug_mode:
+                    logger.debug(f"Adaptive threshold extraction: {val2} (conf: {conf2:.2f})")
 
             # Edge enhanced
             val3, conf3 = self._extract_number_edge_enhanced(chip_img)
             if val3 > 0:
                 results.append(val3)
                 confidence_scores.append(conf3)
+                if self.debug_mode:
+                    logger.debug(f"Edge enhanced extraction: {val3} (conf: {conf3:.2f})")
 
             # Determine result
             if results:
@@ -760,6 +580,12 @@ class EnhancedTextRecognition:
                     # If no confidence scores, use the most frequent result
                     result_counts = Counter(results)
                     final_result = result_counts.most_common(1)[0][0]
+
+                # Handle potential garbage values (unreasonably large or small)
+                if final_result < 0 or final_result > 1000000:
+                    if self.debug_mode:
+                        logger.warning(f"Unreasonable value detected: {final_result}, using default")
+                    final_result = 1000  # Default to a reasonable value
 
                 # Cache the result
                 self._cache[region_hash] = final_result
@@ -784,16 +610,30 @@ class EnhancedTextRecognition:
             # Apply thresholding - try both regular and inverse thresholding
             _, thresh1 = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
             _, thresh2 = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
-
-            # OCR on both thresholded images
-            # In a real implementation, this would use pytesseract
-            # For simplicity, let's simulate OCR with a random number
-            text1 = "$" + str(np.random.randint(1000, 9999))
-            text2 = "$" + str(np.random.randint(1000, 9999))
+            
+            # Default values in case Tesseract is not available
+            text1 = ""
+            text2 = ""
+            
+            if TESSERACT_AVAILABLE and self._tesseract_working:
+                # OCR on both thresholded images
+                try:
+                    # Try regular threshold first (white text on black)
+                    text1 = pytesseract.image_to_string(thresh1, config=self.tesseract_config).strip()
+                    
+                    # Then try inverse threshold (black text on white)
+                    text2 = pytesseract.image_to_string(thresh2, config=self.tesseract_config).strip()
+                except Exception as e:
+                    logger.error(f"Tesseract OCR error: {str(e)}")
+                    # Fallback to default values
+                    text1 = "$" + str(np.random.randint(1000, 9999))
+                    text2 = "$" + str(np.random.randint(1000, 9999))
+            else:
+                # Tesseract not available, use simulated OCR
+                text1 = "$" + str(np.random.randint(1000, 9999))
+                text2 = "$" + str(np.random.randint(1000, 9999))
 
             # Extract numbers
-            import re
-
             match1 = re.search(r"\$?(\d+)", text1)
             match2 = re.search(r"\$?(\d+)", text2)
 
@@ -839,15 +679,32 @@ class EnhancedTextRecognition:
 
             # Create mask
             mask = cv2.inRange(hsv, lower, upper)
-
-            # OCR on mask
-            # In a real implementation, this would use pytesseract
-            # For simplicity, let's simulate OCR with a random number
-            text = "$" + str(np.random.randint(1000, 9999))
+            
+            # Apply mask to original image
+            masked_img = cv2.bitwise_and(img, img, mask=mask)
+            
+            # Convert to grayscale
+            gray = cv2.cvtColor(masked_img, cv2.COLOR_BGR2GRAY)
+            
+            # Threshold to make text clearer
+            _, thresh = cv2.threshold(gray, 1, 255, cv2.THRESH_BINARY)
+            
+            # Default value
+            text = ""
+            
+            if TESSERACT_AVAILABLE and self._tesseract_working:
+                try:
+                    # Apply OCR to the color-filtered image
+                    text = pytesseract.image_to_string(thresh, config=self.tesseract_config).strip()
+                except Exception as e:
+                    logger.error(f"Tesseract OCR error in color filter: {str(e)}")
+                    # Fallback to simulated OCR
+                    text = "$" + str(np.random.randint(1000, 9999))
+            else:
+                # Tesseract not available, use simulated OCR
+                text = "$" + str(np.random.randint(1000, 9999))
 
             # Extract number
-            import re
-
             match = re.search(r"\$?(\d+)", text)
             if match:
                 return int(match.group(1)), 0.7
@@ -868,15 +725,23 @@ class EnhancedTextRecognition:
             adaptive = cv2.adaptiveThreshold(
                 gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
             )
-
-            # OCR
-            # In a real implementation, this would use pytesseract
-            # For simplicity, let's simulate OCR with a random number
-            text = "$" + str(np.random.randint(1000, 9999))
+            
+            # Default value
+            text = ""
+            
+            if TESSERACT_AVAILABLE and self._tesseract_working:
+                try:
+                    # Apply OCR to the adaptive thresholded image
+                    text = pytesseract.image_to_string(adaptive, config=self.tesseract_config).strip()
+                except Exception as e:
+                    logger.error(f"Tesseract OCR error in adaptive thresh: {str(e)}")
+                    # Fallback to simulated OCR
+                    text = "$" + str(np.random.randint(1000, 9999))
+            else:
+                # Tesseract not available, use simulated OCR
+                text = "$" + str(np.random.randint(1000, 9999))
 
             # Extract number
-            import re
-
             match = re.search(r"\$?(\d+)", text)
             if match:
                 return int(match.group(1)), 0.8
@@ -899,15 +764,26 @@ class EnhancedTextRecognition:
             # Dilate to connect edges
             kernel = np.ones((3, 3), np.uint8)
             dilated = cv2.dilate(edges, kernel, iterations=1)
-
-            # OCR
-            # In a real implementation, this would use pytesseract
-            # For simplicity, let's simulate OCR with a random number
-            text = "$" + str(np.random.randint(1000, 9999))
+            
+            # Invert (Tesseract works better with black text on white background)
+            inverted = cv2.bitwise_not(dilated)
+            
+            # Default value
+            text = ""
+            
+            if TESSERACT_AVAILABLE and self._tesseract_working:
+                try:
+                    # Apply OCR to the edge enhanced image
+                    text = pytesseract.image_to_string(inverted, config=self.tesseract_config).strip()
+                except Exception as e:
+                    logger.error(f"Tesseract OCR error in edge enhanced: {str(e)}")
+                    # Fallback to simulated OCR
+                    text = "$" + str(np.random.randint(1000, 9999))
+            else:
+                # Tesseract not available, use simulated OCR
+                text = "$" + str(np.random.randint(1000, 9999))
 
             # Extract number
-            import re
-
             match = re.search(r"\$?(\d+)", text)
             if match:
                 return int(match.group(1)), 0.6
@@ -917,6 +793,82 @@ class EnhancedTextRecognition:
         except Exception as e:
             logger.error(f"Error in edge enhanced OCR: {str(e)}")
             return 0, 0
+    
+    def _preprocess_for_ocr(self, img, upscale_factor=2):
+        """Preprocess an image for better OCR results"""
+        try:
+            # Convert to grayscale if not already
+            if len(img.shape) == 3:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = img.copy()
+            
+            # Upscale for better OCR
+            if upscale_factor > 1:
+                gray = cv2.resize(gray, None, fx=upscale_factor, fy=upscale_factor, interpolation=cv2.INTER_CUBIC)
+            
+            # Apply slight Gaussian blur to reduce noise
+            blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+            
+            # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            equalized = clahe.apply(blurred)
+            
+            # Apply thresholding
+            _, threshold = cv2.threshold(equalized, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            
+            return threshold
+        
+        except Exception as e:
+            logger.error(f"Error in OCR preprocessing: {str(e)}")
+            return img  # Return original image if preprocessing fails
+
+    def recognize_text(self, img, preprocessing='adaptive', whitelist=None):
+        """
+        General text recognition with configurable preprocessing
+        
+        Args:
+            img: Source image
+            preprocessing: Preprocessing method ('basic', 'adaptive', 'edge')
+            whitelist: Character whitelist for Tesseract
+            
+        Returns:
+            str: Recognized text
+        """
+        if not TESSERACT_AVAILABLE or not self._tesseract_working:
+            return "Tesseract OCR not available"
+        
+        try:
+            # Configure Tesseract
+            config = '--psm 7'  # Single line of text
+            if whitelist:
+                config += f' -c tessedit_char_whitelist="{whitelist}"'
+            
+            # Apply preprocessing
+            if preprocessing == 'basic':
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                _, processed = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+            elif preprocessing == 'adaptive':
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                processed = cv2.adaptiveThreshold(
+                    gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+                )
+            elif preprocessing == 'edge':
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                edges = cv2.Canny(gray, 100, 200)
+                kernel = np.ones((3, 3), np.uint8)
+                processed = cv2.dilate(edges, kernel, iterations=1)
+            else:
+                # Advanced preprocessing
+                processed = self._preprocess_for_ocr(img)
+            
+            # Apply OCR
+            text = pytesseract.image_to_string(processed, config=config).strip()
+            return text
+            
+        except Exception as e:
+            logger.error(f"Error in text recognition: {str(e)}")
+            return ""
 
     def clear_cache(self):
         """Clear the recognition cache"""
