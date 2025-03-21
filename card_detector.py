@@ -12,11 +12,15 @@ logger = logging.getLogger("CardDetector")
 
 try:
     import pytesseract
+
     TESSERACT_AVAILABLE = True
 except ImportError:
     TESSERACT_AVAILABLE = False
     logger.warning("pytesseract not installed. Install with: pip install pytesseract")
-    logger.warning("You also need to install Tesseract OCR: https://github.com/tesseract-ocr/tesseract")
+    logger.warning(
+        "You also need to install Tesseract OCR: https://github.com/tesseract-ocr/tesseract"
+    )
+
 
 class ImprovedCardDetector:
     """
@@ -181,10 +185,10 @@ class ImprovedCardDetector:
     def detect_card(self, card_img):
         """
         Detect card value and suit using Tesseract OCR for value and OpenCV for suit
-        
+
         Args:
             card_img: Image of a card (in BGR format from OpenCV)
-            
+
         Returns:
             tuple: (value, suit) or default values if detection fails
         """
@@ -209,69 +213,93 @@ class ImprovedCardDetector:
             height, width = card_img.shape[:2]
 
             # Value is now the top 20x30 px of the ROI image
-            value_height = min(30, height)
+            value_height = min(29, height)
             value_width = min(20, width)
             value_region = card_img[0:value_height, 0:value_width]
 
             # Suit is now the bottom 20x20 px of the ROI image
             suit_height = min(20, height)
             suit_width = min(20, width)
-            suit_region = card_img[max(0, height-suit_height):height, 0:suit_width]
+            suit_region = card_img[max(0, height - suit_height) : height, 0:suit_width]
 
             # Debug output for value and suit regions
             if self.debug_mode or self.save_debug_images:
                 try:
                     # Save the value region
-                    if self.processed_count > 0:  # Make sure we have a valid processed count
+                    if (
+                        self.processed_count > 0
+                    ):  # Make sure we have a valid processed count
                         # Create unique filenames
                         filename = f"card_{self.processed_count:04d}"
-                        
+
                         # Save value region
-                        value_path = os.path.join(self.debug_dir, f"{filename}_value_region.png")
+                        value_path = os.path.join(
+                            self.debug_dir, f"{filename}_value_region.png"
+                        )
                         cv2.imwrite(value_path, value_region)
-                        
+
                         # Save suit region
-                        suit_path = os.path.join(self.debug_dir, f"{filename}_suit_region.png")
+                        suit_path = os.path.join(
+                            self.debug_dir, f"{filename}_suit_region.png"
+                        )
                         cv2.imwrite(suit_path, suit_region)
-                        
+
                         # Log the debug output
-                        logger.info(f"Saved value region (20x30px) and suit region (20x20px) for card {self.processed_count}")
-                        
+                        logger.info(
+                            f"Saved value region (20x30px) and suit region (20x20px) for card {self.processed_count}"
+                        )
+
                         # Draw rectangles on the original image to show regions
                         debug_vis = card_img.copy()
                         # Draw value region rectangle (green)
-                        cv2.rectangle(debug_vis, (0, 0), (value_width, value_height), (0, 255, 0), 2)
+                        cv2.rectangle(
+                            debug_vis,
+                            (0, 0),
+                            (value_width, value_height),
+                            (0, 255, 0),
+                            2,
+                        )
                         # Draw suit region rectangle (blue)
-                        cv2.rectangle(debug_vis, (0, height-suit_height), (suit_width, height), (255, 0, 0), 2)
+                        cv2.rectangle(
+                            debug_vis,
+                            (0, height - suit_height),
+                            (suit_width, height),
+                            (255, 0, 0),
+                            2,
+                        )
                         # Save the visualization
-                        vis_path = os.path.join(self.debug_dir, f"{filename}_regions_vis.png")
+                        vis_path = os.path.join(
+                            self.debug_dir, f"{filename}_regions_vis.png"
+                        )
                         cv2.imwrite(vis_path, debug_vis)
                 except Exception as e:
                     logger.error(f"Error saving debug regions: {str(e)}")
 
             # STEP 3: Use Tesseract OCR to recognize card value
             ocr_value = self._recognize_card_value_with_ocr(value_region)
-            
+
             # STEP 4: Always calculate shape features for value and suit
             value_features = self._calculate_shape_features(value_region, not is_red)
             suit_features = self._calculate_shape_features(suit_region, not is_red)
-            
+
             # STEP 5: Create a feature signature (consistently using shape features)
             feature_key = f"{red_percent:.1f}|{value_features['aspect_ratio']:.2f}|{value_features['complexity']:.1f}"
-            
+
             # STEP 6: Check if we have a direct correction for this feature signature
             if feature_key in self.corrections:
                 # Use the correction
                 value, suit = self.corrections[feature_key]
-                
+
                 # Cache the result
                 self._detection_cache[card_hash] = (value, suit)
-                
+
                 if self.debug_mode:
-                    logger.info(f"Using correction for feature key {feature_key}: {value} of {suit}")
-                
+                    logger.info(
+                        f"Using correction for feature key {feature_key}: {value} of {suit}"
+                    )
+
                 return value, suit
-            
+
             # STEP 7: Use OCR value if available, otherwise use shape-based classification
             if ocr_value not in ["?", ""]:
                 value = ocr_value
@@ -281,8 +309,10 @@ class ImprovedCardDetector:
                 # Fall back to shape-based classification
                 value = self._classify_value(value_features, is_red)
                 if self.debug_mode:
-                    logger.info(f"OCR failed, using shape-based value detection: {value}")
-            
+                    logger.info(
+                        f"OCR failed, using shape-based value detection: {value}"
+                    )
+
             # STEP 8: Use shape-based classification for suit
             suit = self._classify_suit(suit_features, is_red)
 
@@ -290,8 +320,10 @@ class ImprovedCardDetector:
             self._detection_cache[card_hash] = (value, suit)
 
             if self.debug_mode:
-                logger.info(f"Detected card: {value} of {suit} (feature key: {feature_key})")
-                
+                logger.info(
+                    f"Detected card: {value} of {suit} (feature key: {feature_key})"
+                )
+
             return value, suit
 
         except Exception as e:
@@ -301,148 +333,201 @@ class ImprovedCardDetector:
     def _recognize_card_value_with_ocr(self, value_region):
         """
         Use Tesseract OCR to recognize card value with multiple preprocessing methods
-        
+
         Args:
             value_region: Image of the card value region
-            
+
         Returns:
             str: Recognized card value or "?" if recognition fails
         """
         if not TESSERACT_AVAILABLE:
             return "?"
-        
+
         try:
+            gray = cv2.cvtColor(value_region, cv2.COLOR_BGR2GRAY)
+
+            # # Denoising
+            # denoised_gray = cv2.fastNlMeansDenoising(gray, None, h=10)
+            denoised_gray = gray
+            
+
             # Try multiple preprocessing methods for better results
             results = []
-            
-            # Method 1: Basic thresholding
-            gray = cv2.cvtColor(value_region, cv2.COLOR_BGR2GRAY)
-            _, thresh1 = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
-            scaled1 = cv2.resize(thresh1, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-            
-            # Method 2: Inverse thresholding
-            _, thresh2 = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
-            scaled2 = cv2.resize(thresh2, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-            
-            # Method 3: Adaptive thresholding
-            adaptive = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                            cv2.THRESH_BINARY, 11, 2)
-            scaled3 = cv2.resize(adaptive, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-            
+
+            # Method 1: Basic thresholding with sharpening
+            _, thresh1 = cv2.threshold(denoised_gray, 150, 255, cv2.THRESH_BINARY)
+            kernel_sharpening = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+            sharpened1 = cv2.filter2D(thresh1, -1, kernel_sharpening)
+            scaled1 = cv2.resize(
+                sharpened1, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC
+            )
+
+            # Method 2: Inverse thresholding with sharpening
+            _, thresh2 = cv2.threshold(denoised_gray, 150, 255, cv2.THRESH_BINARY_INV)
+            sharpened2 = cv2.filter2D(thresh2, -1, kernel_sharpening)
+            scaled2 = cv2.resize(
+                sharpened2, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC
+            )
+
+            # Method 3: Adaptive thresholding with sharpening
+            adaptive = cv2.adaptiveThreshold(
+                denoised_gray,
+                255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY,
+                11,
+                2,
+            )
+            sharpened3 = cv2.filter2D(adaptive, -1, kernel_sharpening)
+            scaled3 = cv2.resize(
+                sharpened3, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC
+            )
+
+            # Method 4: Morphological operations
+            kernel = np.ones((2, 2), np.uint8)
+            dilated = cv2.dilate(denoised_gray, kernel, iterations=1)
+            eroded = cv2.erode(dilated, kernel, iterations=1)
+            _, thresh3 = cv2.threshold(eroded, 150, 255, cv2.THRESH_BINARY)
+            sharpened4 = cv2.filter2D(thresh3, -1, kernel_sharpening)
+            scaled4 = cv2.resize(
+                sharpened4, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC
+            )
+
             # Save debug images if enabled
             if self.debug_mode and self.save_debug_images and self.processed_count > 0:
                 try:
                     filename = f"card_{self.processed_count:04d}"
-                    
+
                     # Save original grayscale
                     gray_path = os.path.join(self.debug_dir, f"{filename}_ocr_gray.png")
                     cv2.imwrite(gray_path, gray)
-                    
+
                     # Save all preprocessing methods
                     methods = [
-                        ("binary", thresh1, scaled1),
-                        ("inverse", thresh2, scaled2),
-                        ("adaptive", adaptive, scaled3)
+                        ("adaptive", scaled3),
                     ]
-                    
-                    for method_name, original, scaled in methods:
-                        # Save original threshold
-                        thresh_path = os.path.join(self.debug_dir, f"{filename}_ocr_{method_name}.png")
-                        cv2.imwrite(thresh_path, original)
-                        
+
+                    for method_name, scaled in methods:
+
                         # Save scaled version sent to Tesseract
-                        scaled_path = os.path.join(self.debug_dir, f"{filename}_ocr_{method_name}_scaled.png")
+                        scaled_path = os.path.join(
+                            self.debug_dir, f"{filename}_ocr_{method_name}_scaled.png"
+                        )
                         cv2.imwrite(scaled_path, scaled)
-                    
-                    logger.info(f"Saved OCR debug images for card {self.processed_count}")
+
+                    logger.info(
+                        f"Saved OCR debug images for card {self.processed_count}"
+                    )
                 except Exception as e:
                     logger.error(f"Error saving OCR debug images: {str(e)}")
-            
+
             # Define our OCR configuration
             # custom_config = r'--psm 10 --oem 3 -c tessedit_char_whitelist=23456789TJQKA10'
-            custom_config = '--psm 10 --oem 1 -c tessedit_char_whitelist=23456789TJQKA10 -c textord_min_xheight=25'
-            
+            custom_config = "--psm 7 --oem 1 -c tessedit_char_whitelist=23456789TJQKA10"
+
             # Try each preprocessed image
-            for i, (method_name, scaled) in enumerate(zip(["binary", "inverse", "adaptive"], [scaled1, scaled2, scaled3])):
+            for i, (method_name, scaled) in enumerate(zip(["adaptive"], [scaled3])):
                 try:
-                    text = pytesseract.image_to_string(scaled, config=custom_config).strip()
+                    text = pytesseract.image_to_string(
+                        scaled, config=custom_config
+                    ).strip()
                     raw_text = text  # Keep the raw OCR output for debugging
                     text = self._normalize_card_value(text)
-                    
+
                     if self.debug_mode:
-                        logger.debug(f"OCR method {i+1} ({method_name}): Raw='{raw_text}' Normalized='{text}'")
-                    
+                        logger.debug(
+                            f"OCR method {i+1} ({method_name}): Raw='{raw_text}' Normalized='{text}'"
+                        )
+
                     if text != "?":
                         results.append(text)
                 except Exception as e:
                     if self.debug_mode:
-                        logger.debug(f"OCR error with method {i+1} ({method_name}): {str(e)}")
+                        logger.debug(
+                            f"OCR error with method {i+1} ({method_name}): {str(e)}"
+                        )
                     continue
-            
+
             # If we got any valid results, use the most common one
             if results:
                 from collections import Counter
+
                 value_counts = Counter(results)
                 most_common_value = value_counts.most_common(1)[0][0]
                 if self.debug_mode:
-                    logger.debug(f"Most common OCR result: '{most_common_value}' (counts: {dict(value_counts)})")
+                    logger.debug(
+                        f"Most common OCR result: '{most_common_value}' (counts: {dict(value_counts)})"
+                    )
                 return most_common_value
-            
+
             if self.debug_mode:
                 logger.debug(f"OCR failed to detect any valid card value")
             return "?"
-            
+
         except Exception as e:
             logger.error(f"Error during OCR card value recognition: {str(e)}")
             return "?"
 
-   
     def _normalize_card_value(self, text):
         """
         Normalize OCR result to standard card values
-        
+
         Args:
             text: Raw OCR text
-            
+
         Returns:
             str: Normalized card value or "?" if invalid
         """
         if not text:
             return "?"
-        
+
         # Convert to uppercase and remove spaces
-        text = text.upper().replace(' ', '')
-        
+        text = text.upper().replace(" ", "")
+
         # Map common OCR errors
         value_map = {
-            '1': '10',    # Sometimes OCR might misread '10' as '1'
-            'I': '1',
-            'T': '10',
-            'O': 'Q',     # OCR might confuse 'Q' with 'O'
-            'D': 'Q',     # OCR might confuse 'Q' with 'D'
-            '0': '10',    # OCR might confuse '10' with '0'
-            'l': '1',     # OCR might confuse '1' with 'l'
-            'L': '1'      # OCR might confuse '1' with 'L'
+            "1": "10",  # Sometimes OCR might misread '10' as '1'
+            "I": "1",
+            "T": "10",
+            "O": "Q",  # OCR might confuse 'Q' with 'O'
+            "D": "Q",  # OCR might confuse 'Q' with 'D'
+            "0": "10",  # OCR might confuse '10' with '0'
+            "l": "1",  # OCR might confuse '1' with 'l'
+            "L": "1",  # OCR might confuse '1' with 'L'
         }
-        
+
         # Apply value mapping
         if text in value_map:
             text = value_map[text]
-        
+
         # Handle special case for '10'
-        if text.startswith('1') and len(text) > 1:
-            if text[1] == '0' or text[1] == 'O' or text[1] == 'o':
-                return '10'
-        
+        if text.startswith("1") and len(text) > 1:
+            if text[1] == "0" or text[1] == "O" or text[1] == "o":
+                return "10"
+
         # Validate the result
-        valid_values = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
+        valid_values = [
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "10",
+            "J",
+            "Q",
+            "K",
+            "A",
+        ]
         if text in valid_values:
             return text
-        
+
         # Try to extract just the first character if it's valid
-        if text and text[0] in 'JQKA23456789':
+        if text and text[0] in "JQKA23456789":
             return text[0]
-        
+
         return "?"
 
     def _calculate_red_percentage(self, img):
@@ -627,23 +712,28 @@ class ImprovedCardDetector:
         """Clear the detection cache"""
         self._detection_cache.clear()
 
+
 class EnhancedTextRecognition:
     """Enhanced text recognition for chip counts and other poker text using Tesseract OCR"""
 
-    def __init__(self, debug_mode=True, tesseract_path=r'C:\Program Files\Tesseract-OCR\tesseract.exe'):
+    def __init__(
+        self,
+        debug_mode=True,
+        tesseract_path=r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    ):
         self.text_colors = ["white", "yellow", "green"]
         self.debug_mode = debug_mode
 
         # Results cache to avoid redundant processing
         self._cache = {}
-        
+
         # Set tesseract path if provided
         if tesseract_path and TESSERACT_AVAILABLE:
             pytesseract.pytesseract.tesseract_cmd = tesseract_path
-        
+
         # Default tesseract config for digits
         self.tesseract_config = '--psm 7 -c tessedit_char_whitelist="0123456789$."'
-        
+
         # Test if tesseract is available and working
         if TESSERACT_AVAILABLE:
             try:
@@ -728,7 +818,9 @@ class EnhancedTextRecognition:
                     results.append(val)
                     confidence_scores.append(conf)
                     if self.debug_mode:
-                        logger.debug(f"{color.title()} filtered extraction: {val} (conf: {conf:.2f})")
+                        logger.debug(
+                            f"{color.title()} filtered extraction: {val} (conf: {conf:.2f})"
+                        )
 
             # Adaptive threshold
             val2, conf2 = self._extract_number_adaptive(chip_img)
@@ -736,7 +828,9 @@ class EnhancedTextRecognition:
                 results.append(val2)
                 confidence_scores.append(conf2)
                 if self.debug_mode:
-                    logger.debug(f"Adaptive threshold extraction: {val2} (conf: {conf2:.2f})")
+                    logger.debug(
+                        f"Adaptive threshold extraction: {val2} (conf: {conf2:.2f})"
+                    )
 
             # Edge enhanced
             val3, conf3 = self._extract_number_edge_enhanced(chip_img)
@@ -744,7 +838,9 @@ class EnhancedTextRecognition:
                 results.append(val3)
                 confidence_scores.append(conf3)
                 if self.debug_mode:
-                    logger.debug(f"Edge enhanced extraction: {val3} (conf: {conf3:.2f})")
+                    logger.debug(
+                        f"Edge enhanced extraction: {val3} (conf: {conf3:.2f})"
+                    )
 
             # Determine result
             if results:
@@ -760,7 +856,9 @@ class EnhancedTextRecognition:
                 # Handle potential garbage values (unreasonably large or small)
                 if final_result < 0 or final_result > 1000000:
                     if self.debug_mode:
-                        logger.warning(f"Unreasonable value detected: {final_result}, using default")
+                        logger.warning(
+                            f"Unreasonable value detected: {final_result}, using default"
+                        )
                     final_result = 1000  # Default to a reasonable value
 
                 # Cache the result
@@ -786,19 +884,23 @@ class EnhancedTextRecognition:
             # Apply thresholding - try both regular and inverse thresholding
             _, thresh1 = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
             _, thresh2 = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
-            
+
             # Default values in case Tesseract is not available
             text1 = ""
             text2 = ""
-            
+
             if TESSERACT_AVAILABLE and self._tesseract_working:
                 # OCR on both thresholded images
                 try:
                     # Try regular threshold first (white text on black)
-                    text1 = pytesseract.image_to_string(thresh1, config=self.tesseract_config).strip()
-                    
+                    text1 = pytesseract.image_to_string(
+                        thresh1, config=self.tesseract_config
+                    ).strip()
+
                     # Then try inverse threshold (black text on white)
-                    text2 = pytesseract.image_to_string(thresh2, config=self.tesseract_config).strip()
+                    text2 = pytesseract.image_to_string(
+                        thresh2, config=self.tesseract_config
+                    ).strip()
                 except Exception as e:
                     logger.error(f"Tesseract OCR error: {str(e)}")
                     # Fallback to default values
@@ -855,23 +957,25 @@ class EnhancedTextRecognition:
 
             # Create mask
             mask = cv2.inRange(hsv, lower, upper)
-            
+
             # Apply mask to original image
             masked_img = cv2.bitwise_and(img, img, mask=mask)
-            
+
             # Convert to grayscale
             gray = cv2.cvtColor(masked_img, cv2.COLOR_BGR2GRAY)
-            
+
             # Threshold to make text clearer
             _, thresh = cv2.threshold(gray, 1, 255, cv2.THRESH_BINARY)
-            
+
             # Default value
             text = ""
-            
+
             if TESSERACT_AVAILABLE and self._tesseract_working:
                 try:
                     # Apply OCR to the color-filtered image
-                    text = pytesseract.image_to_string(thresh, config=self.tesseract_config).strip()
+                    text = pytesseract.image_to_string(
+                        thresh, config=self.tesseract_config
+                    ).strip()
                 except Exception as e:
                     logger.error(f"Tesseract OCR error in color filter: {str(e)}")
                     # Fallback to simulated OCR
@@ -901,14 +1005,16 @@ class EnhancedTextRecognition:
             adaptive = cv2.adaptiveThreshold(
                 gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
             )
-            
+
             # Default value
             text = ""
-            
+
             if TESSERACT_AVAILABLE and self._tesseract_working:
                 try:
                     # Apply OCR to the adaptive thresholded image
-                    text = pytesseract.image_to_string(adaptive, config=self.tesseract_config).strip()
+                    text = pytesseract.image_to_string(
+                        adaptive, config=self.tesseract_config
+                    ).strip()
                 except Exception as e:
                     logger.error(f"Tesseract OCR error in adaptive thresh: {str(e)}")
                     # Fallback to simulated OCR
@@ -940,17 +1046,19 @@ class EnhancedTextRecognition:
             # Dilate to connect edges
             kernel = np.ones((3, 3), np.uint8)
             dilated = cv2.dilate(edges, kernel, iterations=1)
-            
+
             # Invert (Tesseract works better with black text on white background)
             inverted = cv2.bitwise_not(dilated)
-            
+
             # Default value
             text = ""
-            
+
             if TESSERACT_AVAILABLE and self._tesseract_working:
                 try:
                     # Apply OCR to the edge enhanced image
-                    text = pytesseract.image_to_string(inverted, config=self.tesseract_config).strip()
+                    text = pytesseract.image_to_string(
+                        inverted, config=self.tesseract_config
+                    ).strip()
                 except Exception as e:
                     logger.error(f"Tesseract OCR error in edge enhanced: {str(e)}")
                     # Fallback to simulated OCR
@@ -969,7 +1077,7 @@ class EnhancedTextRecognition:
         except Exception as e:
             logger.error(f"Error in edge enhanced OCR: {str(e)}")
             return 0, 0
-    
+
     def _preprocess_for_ocr(self, img, upscale_factor=2):
         """Preprocess an image for better OCR results"""
         try:
@@ -978,58 +1086,66 @@ class EnhancedTextRecognition:
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             else:
                 gray = img.copy()
-            
+
             # Upscale for better OCR
             if upscale_factor > 1:
-                gray = cv2.resize(gray, None, fx=upscale_factor, fy=upscale_factor, interpolation=cv2.INTER_CUBIC)
-            
+                gray = cv2.resize(
+                    gray,
+                    None,
+                    fx=upscale_factor,
+                    fy=upscale_factor,
+                    interpolation=cv2.INTER_CUBIC,
+                )
+
             # Apply slight Gaussian blur to reduce noise
             blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-            
+
             # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
             equalized = clahe.apply(blurred)
-            
+
             # Apply thresholding
-            _, threshold = cv2.threshold(equalized, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            
+            _, threshold = cv2.threshold(
+                equalized, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+            )
+
             return threshold
-        
+
         except Exception as e:
             logger.error(f"Error in OCR preprocessing: {str(e)}")
             return img  # Return original image if preprocessing fails
 
-    def recognize_text(self, img, preprocessing='adaptive', whitelist=None):
+    def recognize_text(self, img, preprocessing="adaptive", whitelist=None):
         """
         General text recognition with configurable preprocessing
-        
+
         Args:
             img: Source image
             preprocessing: Preprocessing method ('basic', 'adaptive', 'edge')
             whitelist: Character whitelist for Tesseract
-            
+
         Returns:
             str: Recognized text
         """
         if not TESSERACT_AVAILABLE or not self._tesseract_working:
             return "Tesseract OCR not available"
-        
+
         try:
             # Configure Tesseract
-            config = '--psm 7'  # Single line of text
+            config = "--psm 7"  # Single line of text
             if whitelist:
                 config += f' -c tessedit_char_whitelist="{whitelist}"'
-            
+
             # Apply preprocessing
-            if preprocessing == 'basic':
+            if preprocessing == "basic":
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                 _, processed = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
-            elif preprocessing == 'adaptive':
+            elif preprocessing == "adaptive":
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                 processed = cv2.adaptiveThreshold(
                     gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
                 )
-            elif preprocessing == 'edge':
+            elif preprocessing == "edge":
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                 edges = cv2.Canny(gray, 100, 200)
                 kernel = np.ones((3, 3), np.uint8)
@@ -1037,11 +1153,11 @@ class EnhancedTextRecognition:
             else:
                 # Advanced preprocessing
                 processed = self._preprocess_for_ocr(img)
-            
+
             # Apply OCR
             text = pytesseract.image_to_string(processed, config=config).strip()
             return text
-            
+
         except Exception as e:
             logger.error(f"Error in text recognition: {str(e)}")
             return ""
