@@ -3,7 +3,6 @@ import numpy as np
 import os
 import re
 import logging
-import json
 from collections import Counter
 
 # Set up logging
@@ -12,14 +11,11 @@ logger = logging.getLogger("CardDetector")
 
 try:
     import pytesseract
-
     TESSERACT_AVAILABLE = True
 except ImportError:
     TESSERACT_AVAILABLE = False
     logger.warning("pytesseract not installed. Install with: pip install pytesseract")
-    logger.warning(
-        "You also need to install Tesseract OCR: https://github.com/tesseract-ocr/tesseract"
-    )
+    logger.warning("You also need to install Tesseract OCR: https://github.com/tesseract-ocr/tesseract")
 
 
 class ImprovedCardDetector:
@@ -35,19 +31,7 @@ class ImprovedCardDetector:
     ):
         self.template_dir = template_dir
         self.card_values = [
-            "2",
-            "3",
-            "4",
-            "5",
-            "6",
-            "7",
-            "8",
-            "9",
-            "10",
-            "J",
-            "Q",
-            "K",
-            "A",
+            "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A",
         ]
         self.card_suits = ["hearts", "diamonds", "clubs", "spades"]
 
@@ -65,84 +49,11 @@ class ImprovedCardDetector:
         # Ensure template directory exists
         os.makedirs(template_dir, exist_ok=True)
 
-        # Load corrections
-        self.corrections = self._load_corrections()
-
         # Cache for detected cards to improve performance
         self._detection_cache = {}
 
         # Counter for processed images
         self.processed_count = 0
-
-    def _load_corrections(self):
-        """Load corrections from file"""
-        corrections = {}
-        correction_file = os.path.join(self.template_dir, "direct_corrections.json")
-
-        if os.path.exists(correction_file):
-            try:
-                with open(correction_file, "r") as f:
-                    corrections = json.load(f)
-                if self.debug_mode:
-                    logger.info(
-                        f"Loaded {len(corrections)} corrections from {correction_file}"
-                    )
-                return corrections
-            except Exception as e:
-                logger.error(f"Error loading corrections: {str(e)}")
-
-        # Create default corrections if file doesn't exist
-        default_corrections = {
-            # Format: "red_percent|aspect_ratio|complexity": [value, suit]
-        }
-
-        # Save default corrections
-        try:
-            os.makedirs(os.path.dirname(correction_file), exist_ok=True)
-            with open(correction_file, "w") as f:
-                json.dump(default_corrections, f, indent=4)
-            if self.debug_mode:
-                logger.info(
-                    f"Created default corrections file with {len(default_corrections)} entries"
-                )
-        except Exception as e:
-            logger.error(f"Error creating corrections file: {str(e)}")
-
-        return default_corrections
-
-    def save_corrections(self):
-        """Save current corrections to file"""
-        correction_file = os.path.join(self.template_dir, "direct_corrections.json")
-        try:
-            with open(correction_file, "w") as f:
-                json.dump(self.corrections, f, indent=4)
-            if self.debug_mode:
-                logger.info(
-                    f"Saved {len(self.corrections)} corrections to {correction_file}"
-                )
-            return True
-        except Exception as e:
-            logger.error(f"Error saving corrections: {str(e)}")
-            return False
-
-    def add_correction(self, feature_key, correct_value, correct_suit):
-        """
-        Add a correction using the feature key
-
-        Args:
-            feature_key: Feature signature (red_percent|aspect_ratio|complexity)
-            correct_value: Correct card value
-            correct_suit: Correct card suit
-        """
-        # Store the correction
-        self.corrections[feature_key] = [correct_value, correct_suit]
-
-        # Save to file
-        self.save_corrections()
-        if self.debug_mode:
-            logger.info(
-                f"Added correction: {feature_key} -> {correct_value} of {correct_suit}"
-            )
 
     def _compute_card_hash(self, card_img):
         """Compute a hash for a card image to use with caching"""
@@ -171,14 +82,10 @@ class ImprovedCardDetector:
 
             # Save visualization of the RGB version
             viz_path = os.path.join(self.debug_dir, f"{filename}_rgb.png")
-            rgb_for_save = cv2.cvtColor(
-                rgb_img, cv2.COLOR_RGB2BGR
-            )  # Convert back to BGR for OpenCV
+            rgb_for_save = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2BGR)  # Convert back to BGR for OpenCV
             cv2.imwrite(viz_path, rgb_for_save)
 
-            logger.info(
-                f"Saved debug image for card {self.processed_count} to {self.debug_dir}"
-            )
+            logger.info(f"Saved debug image for card {self.processed_count} to {self.debug_dir}")
         except Exception as e:
             logger.error(f"Error saving debug images: {str(e)}")
 
@@ -220,57 +127,35 @@ class ImprovedCardDetector:
             # Suit is now the bottom 20x20 px of the ROI image
             suit_height = min(20, height)
             suit_width = min(20, width)
-            suit_region = card_img[max(0, height - suit_height) : height, 0:suit_width]
+            suit_region = card_img[max(0, height - suit_height):height, 0:suit_width]
 
             # Debug output for value and suit regions
             if self.debug_mode or self.save_debug_images:
                 try:
                     # Save the value region
-                    if (
-                        self.processed_count > 0
-                    ):  # Make sure we have a valid processed count
+                    if self.processed_count > 0:  # Make sure we have a valid processed count
                         # Create unique filenames
                         filename = f"card_{self.processed_count:04d}"
 
                         # Save value region
-                        value_path = os.path.join(
-                            self.debug_dir, f"{filename}_value_region.png"
-                        )
+                        value_path = os.path.join(self.debug_dir, f"{filename}_value_region.png")
                         cv2.imwrite(value_path, value_region)
 
                         # Save suit region
-                        suit_path = os.path.join(
-                            self.debug_dir, f"{filename}_suit_region.png"
-                        )
+                        suit_path = os.path.join(self.debug_dir, f"{filename}_suit_region.png")
                         cv2.imwrite(suit_path, suit_region)
 
                         # Log the debug output
-                        logger.info(
-                            f"Saved value region (20x30px) and suit region (20x20px) for card {self.processed_count}"
-                        )
+                        logger.info(f"Saved value region (20x30px) and suit region (20x20px) for card {self.processed_count}")
 
                         # Draw rectangles on the original image to show regions
                         debug_vis = card_img.copy()
                         # Draw value region rectangle (green)
-                        cv2.rectangle(
-                            debug_vis,
-                            (0, 0),
-                            (value_width, value_height),
-                            (0, 255, 0),
-                            2,
-                        )
+                        cv2.rectangle(debug_vis, (0, 0), (value_width, value_height), (0, 255, 0), 2)
                         # Draw suit region rectangle (blue)
-                        cv2.rectangle(
-                            debug_vis,
-                            (0, height - suit_height),
-                            (suit_width, height),
-                            (255, 0, 0),
-                            2,
-                        )
+                        cv2.rectangle(debug_vis, (0, height - suit_height), (suit_width, height), (255, 0, 0), 2)
                         # Save the visualization
-                        vis_path = os.path.join(
-                            self.debug_dir, f"{filename}_regions_vis.png"
-                        )
+                        vis_path = os.path.join(self.debug_dir, f"{filename}_regions_vis.png")
                         cv2.imwrite(vis_path, debug_vis)
                 except Exception as e:
                     logger.error(f"Error saving debug regions: {str(e)}")
@@ -278,29 +163,11 @@ class ImprovedCardDetector:
             # STEP 3: Use Tesseract OCR to recognize card value
             ocr_value = self._recognize_card_value_with_ocr(value_region)
 
-            # STEP 4: Always calculate shape features for value and suit
+            # STEP 4: Calculate shape features for value and suit
             value_features = self._calculate_shape_features(value_region, not is_red)
             suit_features = self._calculate_shape_features(suit_region, not is_red)
 
-            # STEP 5: Create a feature signature (consistently using shape features)
-            feature_key = f"{red_percent:.1f}|{value_features['aspect_ratio']:.2f}|{value_features['complexity']:.1f}"
-
-            # STEP 6: Check if we have a direct correction for this feature signature
-            if feature_key in self.corrections:
-                # Use the correction
-                value, suit = self.corrections[feature_key]
-
-                # Cache the result
-                self._detection_cache[card_hash] = (value, suit)
-
-                if self.debug_mode:
-                    logger.info(
-                        f"Using correction for feature key {feature_key}: {value} of {suit}"
-                    )
-
-                return value, suit
-
-            # STEP 7: Use OCR value if available, otherwise use shape-based classification
+            # STEP 5: Use OCR value if available, otherwise use shape-based classification
             if ocr_value not in ["?", ""]:
                 value = ocr_value
                 if self.debug_mode:
@@ -309,20 +176,16 @@ class ImprovedCardDetector:
                 # Fall back to shape-based classification
                 value = self._classify_value(value_features, is_red)
                 if self.debug_mode:
-                    logger.info(
-                        f"OCR failed, using shape-based value detection: {value}"
-                    )
+                    logger.info(f"OCR failed, using shape-based value detection: {value}")
 
-            # STEP 8: Use shape-based classification for suit
+            # STEP 6: Use shape-based classification for suit
             suit = self._classify_suit(suit_features, is_red)
 
             # Cache the result
             self._detection_cache[card_hash] = (value, suit)
 
             if self.debug_mode:
-                logger.info(
-                    f"Detected card: {value} of {suit} (feature key: {feature_key})"
-                )
+                logger.info(f"Detected card: {value} of {suit}")
 
             return value, suit
 
@@ -346,8 +209,6 @@ class ImprovedCardDetector:
         try:
             gray = cv2.cvtColor(value_region, cv2.COLOR_BGR2GRAY)
 
-            # # Denoising
-            # denoised_gray = cv2.fastNlMeansDenoising(gray, None, h=10)
             denoised_gray = gray
 
             # Try multiple preprocessing methods for better results
@@ -357,16 +218,12 @@ class ImprovedCardDetector:
             _, thresh1 = cv2.threshold(denoised_gray, 150, 255, cv2.THRESH_BINARY)
             kernel_sharpening = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
             sharpened1 = cv2.filter2D(thresh1, -1, kernel_sharpening)
-            scaled1 = cv2.resize(
-                sharpened1, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC
-            )
+            scaled1 = cv2.resize(sharpened1, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
 
             # Method 2: Inverse thresholding with sharpening
             _, thresh2 = cv2.threshold(denoised_gray, 150, 255, cv2.THRESH_BINARY_INV)
             sharpened2 = cv2.filter2D(thresh2, -1, kernel_sharpening)
-            scaled2 = cv2.resize(
-                sharpened2, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC
-            )
+            scaled2 = cv2.resize(sharpened2, (0, 0), fx=10, fy=10, interpolation=cv2.INTER_CUBIC)
 
             # Method 3: Adaptive thresholding with sharpening
             adaptive = cv2.adaptiveThreshold(
@@ -378,9 +235,7 @@ class ImprovedCardDetector:
                 2,
             )
             sharpened3 = cv2.filter2D(adaptive, -1, kernel_sharpening)
-            scaled3 = cv2.resize(
-                sharpened3, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC
-            )
+            scaled3 = cv2.resize(sharpened3, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
 
             # Method 4: Morphological operations
             kernel = np.ones((2, 2), np.uint8)
@@ -388,9 +243,7 @@ class ImprovedCardDetector:
             eroded = cv2.erode(dilated, kernel, iterations=1)
             _, thresh3 = cv2.threshold(eroded, 150, 255, cv2.THRESH_BINARY)
             sharpened4 = cv2.filter2D(thresh3, -1, kernel_sharpening)
-            scaled4 = cv2.resize(
-                sharpened4, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC
-            )
+            scaled4 = cv2.resize(sharpened4, (0, 0), fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
 
             # Save debug images if enabled
             if self.debug_mode and self.save_debug_images and self.processed_count > 0:
@@ -410,22 +263,17 @@ class ImprovedCardDetector:
                     ]
 
                     for method_name, scaled in methods:
-
                         # Save scaled version sent to Tesseract
                         scaled_path = os.path.join(
                             self.debug_dir, f"{filename}_ocr_{method_name}_scaled.png"
                         )
                         cv2.imwrite(scaled_path, scaled)
 
-                    logger.info(
-                        f"Saved OCR debug images for card {self.processed_count}"
-                    )
+                    logger.info(f"Saved OCR debug images for card {self.processed_count}")
                 except Exception as e:
                     logger.error(f"Error saving OCR debug images: {str(e)}")
 
-            custom_config = (
-                r"--psm 10 --oem 3 -c tessedit_char_whitelist=23456789TJQKA10"
-            )
+            custom_config = r"--psm 10 --oem 3 -c tessedit_char_whitelist=23456789TJQKA10"
 
             # Try each preprocessed image
             for i, (method_name, scaled) in enumerate(
@@ -435,9 +283,7 @@ class ImprovedCardDetector:
                 )
             ):
                 try:
-                    text = pytesseract.image_to_string(
-                        scaled, config=custom_config
-                    ).strip()
+                    text = pytesseract.image_to_string(scaled, config=custom_config).strip()
                     raw_text = text  # Keep the raw OCR output for debugging
                     text = self._normalize_card_value(text)
 
@@ -450,15 +296,11 @@ class ImprovedCardDetector:
                         results.append(text)
                 except Exception as e:
                     if self.debug_mode:
-                        logger.debug(
-                            f"OCR error with method {i+1} ({method_name}): {str(e)}"
-                        )
+                        logger.debug(f"OCR error with method {i+1} ({method_name}): {str(e)}")
                     continue
 
             # If we got any valid results, use the most common one
             if results:
-                from collections import Counter
-
                 value_counts = Counter(results)
                 most_common_value = value_counts.most_common(1)[0][0]
                 if self.debug_mode:
@@ -514,19 +356,7 @@ class ImprovedCardDetector:
 
         # Validate the result
         valid_values = [
-            "2",
-            "3",
-            "4",
-            "5",
-            "6",
-            "7",
-            "8",
-            "9",
-            "10",
-            "J",
-            "Q",
-            "K",
-            "A",
+            "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A",
         ]
         if text in valid_values:
             return text
@@ -580,15 +410,11 @@ class ImprovedCardDetector:
             gray = cv2.cvtColor(region_img, cv2.COLOR_BGR2GRAY)
 
             # Apply thresholding
-            thresh_mode = (
-                cv2.THRESH_BINARY_INV if invert_threshold else cv2.THRESH_BINARY
-            )
+            thresh_mode = cv2.THRESH_BINARY_INV if invert_threshold else cv2.THRESH_BINARY
             _, thresh = cv2.threshold(gray, 150, 255, thresh_mode)
 
             # Find contours
-            contours, _ = cv2.findContours(
-                thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-            )
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             # Default features if no contours found
             default_features = {
@@ -718,7 +544,6 @@ class ImprovedCardDetector:
     def clear_cache(self):
         """Clear the detection cache"""
         self._detection_cache.clear()
-
 
 class EnhancedTextRecognition:
     """Enhanced text recognition for chip counts and other poker text using Tesseract OCR"""
