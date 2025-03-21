@@ -349,7 +349,6 @@ class ImprovedCardDetector:
             # # Denoising
             # denoised_gray = cv2.fastNlMeansDenoising(gray, None, h=10)
             denoised_gray = gray
-            
 
             # Try multiple preprocessing methods for better results
             results = []
@@ -404,7 +403,10 @@ class ImprovedCardDetector:
 
                     # Save all preprocessing methods
                     methods = [
+                        ("thresh1", scaled1),
+                        ("thresh2", scaled2),
                         ("adaptive", scaled3),
+                        ("kernel", scaled4),
                     ]
 
                     for method_name, scaled in methods:
@@ -421,12 +423,17 @@ class ImprovedCardDetector:
                 except Exception as e:
                     logger.error(f"Error saving OCR debug images: {str(e)}")
 
-            # Define our OCR configuration
-            # custom_config = r'--psm 10 --oem 3 -c tessedit_char_whitelist=23456789TJQKA10'
-            custom_config = "--psm 7 --oem 1 -c tessedit_char_whitelist=23456789TJQKA10"
+            custom_config = (
+                r"--psm 10 --oem 3 -c tessedit_char_whitelist=23456789TJQKA10"
+            )
 
             # Try each preprocessed image
-            for i, (method_name, scaled) in enumerate(zip(["adaptive"], [scaled3])):
+            for i, (method_name, scaled) in enumerate(
+                zip(
+                    ["thresh1", "thresh2", "adaptive", "kernel"],
+                    [scaled1, scaled2, scaled3, scaled4],
+                )
+            ):
                 try:
                     text = pytesseract.image_to_string(
                         scaled, config=custom_config
