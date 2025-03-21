@@ -208,11 +208,48 @@ class ImprovedCardDetector:
             # STEP 2: Extract value and suit regions
             height, width = card_img.shape[:2]
 
-            # Value is typically in the top-left corner
-            value_region = card_img[0 : int(height * 0.6), 0 : int(width)]
+            # Value is now the top 20x30 px of the ROI image
+            # Ensure we don't exceed image dimensions
+            value_height = min(30, height)
+            value_width = min(20, width)
+            value_region = card_img[0:value_height, 0:value_width]
 
-            # Suit is typically in the center
-            suit_region = card_img[int(height * 0.6) : int(height), 0 : int(width)]
+            # Suit is now the bottom 20x20 px of the ROI image
+            # Ensure we don't exceed image dimensions
+            suit_height = min(20, height)
+            suit_width = min(20, width)
+            suit_region = card_img[max(0, height-suit_height):height, 0:suit_width]
+
+            # Debug output for value and suit regions
+            if self.debug_mode or self.save_debug_images:
+                try:
+                    # Save the value region
+                    if self.processed_count > 0:  # Make sure we have a valid processed count
+                        # Create unique filenames
+                        filename = f"card_{self.processed_count:04d}"
+                        
+                        # Save value region
+                        value_path = os.path.join(self.debug_dir, f"{filename}_value_region.png")
+                        cv2.imwrite(value_path, value_region)
+                        
+                        # Save suit region
+                        suit_path = os.path.join(self.debug_dir, f"{filename}_suit_region.png")
+                        cv2.imwrite(suit_path, suit_region)
+                        
+                        # Log the debug output
+                        logger.info(f"Saved value region (20x30px) and suit region (20x20px) for card {self.processed_count}")
+                        
+                        # Draw rectangles on the original image to show regions
+                        debug_vis = card_img.copy()
+                        # Draw value region rectangle (green)
+                        cv2.rectangle(debug_vis, (0, 0), (value_width, value_height), (0, 255, 0), 2)
+                        # Draw suit region rectangle (blue)
+                        cv2.rectangle(debug_vis, (0, height-suit_height), (suit_width, height), (255, 0, 0), 2)
+                        # Save the visualization
+                        vis_path = os.path.join(self.debug_dir, f"{filename}_regions_vis.png")
+                        cv2.imwrite(vis_path, debug_vis)
+                except Exception as e:
+                    logger.error(f"Error saving debug regions: {str(e)}")
 
             # STEP 3: Analyze shapes to determine value and suit
             value_features = self._calculate_shape_features(value_region, not is_red)
@@ -234,28 +271,6 @@ class ImprovedCardDetector:
             value = self._classify_value(value_features, is_red)
             suit = self._classify_suit(suit_features, is_red)
 
-            # STEP 7: Apply specific rules for problematic cases like 3 of clubs vs Ace of spades
-            if value == "A" and suit == "spades" and not is_red:
-                # The classic 3 of clubs vs Ace of spades problem
-                if (
-                    0.5 <= value_features["aspect_ratio"] <= 0.65
-                    and value_features["complexity"] >= 20
-                ):
-                    value = "3"
-                    suit = "clubs"
-            
-            # Additional post-processing rules for common misclassifications
-            if value == "3" and value_features["aspect_ratio"] > 0.8:
-                # 3 is often confused with 8 when aspect ratio is high
-                value = "8"
-            
-            if value == "6" and value_features["complexity"] < 15:
-                # 6 is often confused with 9 when complexity is low
-                value = "9"
-                
-            if value == "J" and value_features["complexity"] > 22:
-                # J is often confused with Q when complexity is high
-                value = "Q"
 
             # Cache the result
             self._detection_cache[card_hash] = (value, suit)
