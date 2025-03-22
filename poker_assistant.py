@@ -519,8 +519,14 @@ class PokerAssistant:
                 # Determine the player position (main player is position 1)
                 player_position = 1  # Main player
                 
+                
+                adapter = RLCardAdapter(model_path='models/poker_model.pt')
+ 
+                # Use it to predict actions during gameplay
+                decision = adapter.predict_action(game_state, player_position)
+                
                 # Make a decision using the neural network
-                decision = self.neural_network.predict_action(game_state, player_position)
+                # decision = self.neural_network.predict_action(game_state, player_position)
                 self.latest_decision = decision
                 
                 # Calculate decision time
@@ -577,18 +583,76 @@ class PokerAssistant:
     
     def _take_action(self, decision):
         """
-        Take an action in the game based on the decision
+        Take an action in the game based on the decision by sending keyboard commands
         
-        This would integrate with the game's UI through mouse/keyboard automation
-        For safety, this is left as a stub that just logs the intended action
+        Args:
+            decision: Decision dictionary with 'action' and 'bet_size_percentage' keys
+        
+        Returns:
+            bool: True if action was taken successfully, False otherwise
         """
-        action = decision['action']
-        bet_size = decision['bet_size_percentage']
-        
-        logger.info(f"Auto-play: Would {action} with bet size {bet_size * 100:.1f}% of pot")
-        
-        # In a real implementation, this would use pyautogui or similar
-        # to interact with the game UI
+        try:
+            action = decision['action']
+            bet_size = decision['bet_size_percentage']
+            confidence = decision.get('confidence', 0)
+            
+            logger.info(f"Auto-play: Taking action {action} with bet size {bet_size * 100:.1f}% of pot (confidence: {confidence:.2f})")
+            
+            # Check if we have a window selected
+            if not hasattr(self, 'screen_grabber') or not self.screen_grabber.selected_window:
+                logger.warning("Auto-play: No window selected for sending commands")
+                return False
+            
+            # Map decision to function key
+            key_mapping = {
+                'fold': 'F1',
+                'check/call': 'F2',
+                'bet/raise': 'F3',
+                'all-in': 'F4'  # Special case
+            }
+            
+            # Special case for all-in decisions
+            if action == 'bet/raise' and bet_size >= 0.95:  # If bet size is ≥95% of pot, consider it all-in
+                action_key = key_mapping['all-in']
+                logger.info(f"Auto-play: Large bet detected ({bet_size * 100:.1f}% of pot), treating as all-in")
+            else:
+                # Get corresponding key for the action
+                action_key = key_mapping.get(action)
+                
+                if not action_key:
+                    logger.error(f"Auto-play: Unknown action '{action}'")
+                    return False
+            
+            # Ensure the window is in focus before sending keys
+            try:
+                # Check if we're on Windows and have win32gui available
+                import platform
+                import importlib.util
+                
+                is_windows = platform.system() == 'Windows'
+                has_win32gui = importlib.util.find_spec('win32gui') is not None
+                
+                if is_windows and has_win32gui and hasattr(self.screen_grabber, 'window_handle'):
+                    import win32gui
+                    win32gui.SetForegroundWindow(self.screen_grabber.window_handle)
+                    time.sleep(0.3)  # Short delay to ensure window is focused
+                    logger.info("Auto-play: Window focused successfully")
+            except Exception as e:
+                logger.warning(f"Auto-play: Failed to focus window: {str(e)}")
+            
+            # Press the corresponding function key
+            import pyautogui
+            pyautogui.press(action_key)
+            logger.info(f"Auto-play: Pressed {action_key} for action '{action}'")
+            
+            # Add a small delay after action
+            time.sleep(0.5)
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Auto-play: Error taking action: {str(e)}", exc_info=True)
+            return False
     
     def get_latest_state(self):
         """Get the latest game state and decision with timing information"""

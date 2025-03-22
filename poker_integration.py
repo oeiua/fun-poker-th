@@ -15,7 +15,7 @@ logger = logging.getLogger("PokerNNIntegration")
 class RLCardAdapter:
     """Adapter to integrate rlcard-trained neural network with the existing poker assistant"""
     
-    def __init__(self, model_path=None, device=None):
+    def __init__(self, model_path="models/poker_model.pt", device=None):
         self.feature_extractor = PokerFeatureExtractor()
         
         # Set device (GPU if available, otherwise CPU)
