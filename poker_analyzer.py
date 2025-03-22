@@ -6,6 +6,7 @@ import json
 import time
 from pathlib import Path
 from functools import lru_cache
+import numpy as np  # Make sure numpy is imported for np.bool_ type
 
 # Import our improved components
 from card_detector import ImprovedCardDetector, EnhancedTextRecognition
@@ -65,6 +66,22 @@ class OptimizedPokerAnalyzer:
                 9: [(550, 380, 80, 20)]    # Player 9 (bottom center right)
             },
             
+            # Main player chips
+            "main_player_chips": [(280, 392, 100, 25)],
+            
+            # Current bets
+            "current_bets": {
+                1: [(280, 350, 70, 20)],  # Player 1 current bet
+                2: [(120, 320, 70, 20)],  # Player 2 current bet
+                3: [(120, 120, 70, 20)],  # Player 3 current bet
+                4: [(280, 70, 70, 20)],   # Player 4 current bet
+                5: [(400, 70, 70, 20)],   # Player 5 current bet
+                6: [(520, 70, 70, 20)],   # Player 6 current bet
+                7: [(680, 120, 70, 20)],  # Player 7 current bet
+                8: [(680, 320, 70, 20)],  # Player 8 current bet
+                9: [(520, 350, 70, 20)],  # Player 9 current bet
+            },
+            
             # Pot information
             'pot': [(280, 248, 100, 20)],  # Pot size area
             
@@ -72,7 +89,14 @@ class OptimizedPokerAnalyzer:
             'game_stage': [
                 (265, 197, 80, 25),  # Game stage text (Preflop, Flop, Turn, River)
                 (720, 197, 80, 25)   # Alternative location for game stage
-            ]
+            ],
+            
+            # Action buttons
+            "actions": {
+                "raise": [(510, 480, 80, 20)],  # Raise button/amount
+                "call": [(510, 530, 80, 20)],   # Call button/amount
+                "fold": [(510, 580, 80, 20)],   # Fold button
+            },
         }
     
     def load_roi_from_file(self, filename="roi_config.json"):
@@ -107,6 +131,29 @@ class OptimizedPokerAnalyzer:
         file_stat = os.stat(image_path)
         return hash((file_stat.st_size, file_stat.st_mtime))
     
+    def _ensure_json_serializable(self, obj):
+        """
+        Ensure all values in a nested structure are JSON serializable
+        
+        Args:
+            obj: Any object (dict, list, etc.)
+            
+        Returns:
+            JSON serializable version of the object
+        """
+        if isinstance(obj, dict):
+            return {k: self._ensure_json_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._ensure_json_serializable(item) for item in obj]
+        elif isinstance(obj, (bool, np.bool_)):
+            # Explicitly convert any boolean type to Python's built-in bool
+            return bool(obj)
+        elif isinstance(obj, (int, float, str, type(None))):
+            return obj
+        else:
+            # Convert any other type to string for safety
+            return str(obj)
+            
     def analyze_image(self, image_path):
         """
         Analyze a poker table screenshot and extract game state with caching for improved performance
@@ -147,7 +194,8 @@ class OptimizedPokerAnalyzer:
                 'community_cards': [],
                 'players': {},
                 'pot': 0,
-                'game_stage': 'preflop'
+                'game_stage': 'preflop',
+                'available_actions': {}  # New field for available actions
             }
             
             # Detect game stage first to know how many community cards to expect
@@ -188,14 +236,31 @@ class OptimizedPokerAnalyzer:
             if 'pot' in self.roi and self.roi['pot']:
                 game_state['pot'] = self._extract_pot_size(original_img, self.roi['pot'][0])
             
+            # NEW: Extract current bets for each player
+            self.logger.debug("Extracting current bets for players")
+            for player_id in list(game_state['players'].keys()):
+                if 'current_bets' in self.roi and player_id in self.roi.get('current_bets', {}):
+                    bet_region = self.roi['current_bets'][player_id][0]
+                    current_bet = self._extract_current_bet(original_img, bet_region)
+                    game_state['players'][player_id]['current_bet'] = current_bet
+                    self.logger.debug(f"Player {player_id} current bet: {current_bet}")
+            
+            # NEW: Detect available actions
+            self.logger.debug("Detecting available actions")
+            game_state['available_actions'] = self._detect_available_actions(original_img)
+            self.logger.debug(f"Available actions: {game_state['available_actions']}")
+            
             # Calculate elapsed time
             elapsed_time = time.time() - start_time
             self.logger.info(f"Image analysis completed in {elapsed_time:.2f} seconds")
             
-            # Cache the result
-            self._analysis_cache[img_hash] = game_state
+            # Ensure all values are JSON serializable
+            json_safe_game_state = self._ensure_json_serializable(game_state)
             
-            return game_state
+            # Cache the result
+            self._analysis_cache[img_hash] = json_safe_game_state
+            
+            return json_safe_game_state
             
         except Exception as e:
             self.logger.error(f"Error analyzing image {image_path}: {str(e)}", exc_info=True)
@@ -333,12 +398,80 @@ class OptimizedPokerAnalyzer:
             
         return self.text_recognizer.extract_chip_count(img, region)
     
+    def _extract_current_bet(self, img, region):
+        """
+        Extract current bet from the image using text recognition
+        
+        Args:
+            img: Source image
+            region: Region tuple (x, y, w, h) defining the location of the bet text
+            
+        Returns:
+            int: Extracted bet amount, or 0 if extraction fails
+        """
+        if not self._is_valid_region(region, img.shape):
+            return 0
+                
+        # Use the same text recognition approach as for chip counts
+        return self.text_recognizer.extract_chip_count(img, region)
+    
     def _extract_pot_size(self, img, region):
         """Extract pot size using the enhanced text recognizer"""
         if not self._is_valid_region(region, img.shape):
             return 0
             
         return self.text_recognizer.extract_chip_count(img, region)
+    
+    def _detect_available_actions(self, img):
+        """
+        Detect available actions based on action button regions in the ROI
+        
+        Args:
+            img: Source image
+            
+        Returns:
+            dict: Dictionary with actions as keys and boolean values indicating availability
+        """
+        # Initialize all actions as unavailable by default
+        available_actions = {
+            'raise': False,
+            'call': False, 
+            'fold': False
+        }
+        
+        # Check if actions are defined in ROI
+        if 'actions' not in self.roi:
+            self.logger.warning("No action regions defined in ROI configuration")
+            return available_actions
+            
+        # Check each action
+        for action, regions in self.roi['actions'].items():
+            if not regions:
+                continue
+                
+            region = regions[0]  # Take the first region for each action
+            
+            if not self._is_valid_region(region, img.shape):
+                self.logger.warning(f"Invalid action region for {action}: {region}")
+                continue
+                
+            # Extract the action button region
+            x, y, w, h = region
+            button_img = img[y:y+h, x:x+w]
+            
+            # Simple brightness-based detection
+            # A more sophisticated approach would analyze the button's appearance and text
+            gray = cv2.cvtColor(button_img, cv2.COLOR_BGR2GRAY)
+            avg_brightness = np.mean(gray)
+            
+            # Consider the action available if the region is bright enough
+            # This threshold might need adjustment based on the specific UI
+            # Use Python's built-in bool for JSON serialization
+            available_actions[action] = bool(avg_brightness > 50)
+            
+            self.logger.debug(f"Action {action}: brightness={avg_brightness}, available={available_actions[action]}")
+        
+        return available_actions
     
     def _detect_game_stage(self, img):
         """
@@ -390,10 +523,16 @@ class OptimizedPokerAnalyzer:
                         {'value': 'A', 'suit': 'hearts'},
                         {'value': 'K', 'suit': 'hearts'}
                     ],
-                    'position': 1
+                    'position': 1,
+                    'current_bet': 20  # Added default current bet
                 }
             },
-            'pot': 200
+            'pot': 200,
+            'available_actions': {  # Added available actions
+                'raise': True,
+                'call': True,
+                'fold': True
+            }
         }
         
         return game_state

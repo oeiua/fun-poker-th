@@ -50,7 +50,7 @@ class PokerApplication:
         """Initialize the application with improved error recovery"""
         self.root = root
         self.root.title("Poker CV Assistant")
-        self.root.geometry("1200x800")
+        self.root.geometry("1300x1300")
         self.root.minsize(900, 600)
         
         # Check for import errors and warn the user if necessary
@@ -124,11 +124,11 @@ class PokerApplication:
     def _load_config(self, config_file=None):
         """Load configuration with improved error handling and defaults"""
         default_config = {
-            'capture_interval': 2.0,
+            'capture_interval': 10.0,
             'screenshot_dir': 'poker_data/screenshots',
             'game_state_dir': 'poker_data/game_states',
             'training_data_dir': 'poker_data/training',
-            'model_path': None,
+            'model_path': 'models/best_model.pt',
             'model_save_path': 'models/poker_model.pt',
             'auto_play': False,
             'confidence_threshold': 0.7,
