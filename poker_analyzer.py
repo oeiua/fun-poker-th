@@ -167,8 +167,15 @@ class OptimizedPokerAnalyzer:
                     for card_region in card_regions:
                         self._extract_card(original_img, card_region, player_cards)
                     
-                    # Get player's chip count
-                    chip_region = self.roi.get('player_chips', {}).get(player_id, [(0, 0, 0, 0)])[0]
+                    # Get player's chip count - FIXED to prioritize main_player_chips for player 1
+                    if player_id == 1 and 'main_player_chips' in self.roi and self.roi['main_player_chips']:
+                        # Use the specialized main_player_chips ROI for player 1 (human player)
+                        chip_region = self.roi['main_player_chips'][0]
+                        self.logger.debug("Using main_player_chips ROI for player 1")
+                    else:
+                        # Use regular player_chips ROI for other players
+                        chip_region = self.roi.get('player_chips', {}).get(player_id, [(0, 0, 0, 0)])[0]
+                    
                     chips = self._extract_chip_count(original_img, chip_region)
                     
                     game_state['players'][player_id] = {
@@ -194,7 +201,7 @@ class OptimizedPokerAnalyzer:
             self.logger.error(f"Error analyzing image {image_path}: {str(e)}", exc_info=True)
             # Return a default game state as fallback
             return self._create_default_game_state()
-    
+
     def _extract_card(self, img, region, cards_list):
         """
         Extract a card from the image and add it to the cards list.

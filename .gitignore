@@ -8,6 +8,7 @@ poker_data/
 card_templates/
 card_templates*/
 dataset/
+models/
 *.h5
 # C extensions
 *.so

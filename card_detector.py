@@ -27,7 +27,7 @@ class ImprovedCardDetector:
         self,
         template_dir="card_templates",
         debug_mode=True,
-        save_debug_images=True,
+        save_debug_images=False,
     ):
         self.template_dir = template_dir
         self.card_values = [
@@ -121,9 +121,9 @@ class ImprovedCardDetector:
                 self._save_debug_image(card_img.copy())
 
             # Check cache first for improved performance
-            card_hash = self._compute_card_hash(card_img)
-            if card_hash in self._detection_cache:
-                return self._detection_cache[card_hash]
+            # card_hash = self._compute_card_hash(card_img)
+            # if card_hash in self._detection_cache:
+            #     return self._detection_cache[card_hash]
 
             # STEP 1: Determine if card is red or black
             red_percent = self._calculate_red_percentage(card_img)
@@ -195,7 +195,7 @@ class ImprovedCardDetector:
             suit = self._classify_suit(suit_features, is_red)
 
             # Cache the result
-            self._detection_cache[card_hash] = (value, suit)
+            # self._detection_cache[card_hash] = (value, suit)
 
             if self.debug_mode:
                 logger.info(f"Detected card: {value} of {suit}")
@@ -364,7 +364,8 @@ class ImprovedCardDetector:
         # Map common OCR errors
         value_map = {
             "1": "10",  # Sometimes OCR might misread '10' as '1'
-            "I": "1",
+            "I": "10",
+            "1Q": "10",
             "T": "10",
             "O": "Q",  # OCR might confuse 'Q' with 'O'
             "D": "Q",  # OCR might confuse 'Q' with 'D'
@@ -558,13 +559,13 @@ class ImprovedCardDetector:
         # Filter possible suits by color first
         if is_red:
             # Red suits: hearts and diamonds
-            if features["aspect_ratio"] > 1.0 or features["complexity"] < 20:
+            if features["aspect_ratio"] > 1.0 or features["complexity"] < 17:
                 return "diamonds"  # Diamonds typically have a simpler shape and higher aspect ratio
             else:
                 return "hearts"  # Hearts typically have a more complex shape
         else:
             # Black suits: clubs and spades
-            if features["complexity"] > 20:
+            if features["complexity"] > 36:
                 return "clubs"  # Clubs typically have a more complex shape
             else:
                 return "spades"  # Spades typically have a simpler shape
