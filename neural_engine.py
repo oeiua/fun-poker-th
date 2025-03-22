@@ -802,11 +802,11 @@ class OptimizedPokerNeuralNetwork:
             Dictionary with predicted action, confidence, and bet size
         """
         try:
-            # Check decision cache first
-            cache_key = self._make_decision_key(game_state, player_position)
-            if cache_key in self._decision_cache:
-                self.logger.debug("Using cached decision")
-                return self._decision_cache[cache_key]
+            # # Check decision cache first
+            # cache_key = self._make_decision_key(game_state, player_position)
+            # if cache_key in self._decision_cache:
+            #     self.logger.debug("Using cached decision")
+            #     return self._decision_cache[cache_key]
             
             # Extract features
             features = self.feature_extractor.extract_features(game_state, player_position)
@@ -843,9 +843,6 @@ class OptimizedPokerNeuralNetwork:
                 'confidence': confidence,
                 'bet_size_percentage': bet_percentage
             }
-            
-            # Cache the decision
-            self._decision_cache[cache_key] = decision
             
             return decision
         except Exception as e:

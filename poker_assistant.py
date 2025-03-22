@@ -13,6 +13,7 @@ import argparse
 from screen_grabber import PokerScreenGrabber, WindowInfo
 from poker_analyzer import OptimizedPokerAnalyzer
 from neural_engine import OptimizedPokerNeuralNetwork
+from poker_integration import RLCardAdapter
 
 # Set up logging with a more detailed format
 logging.basicConfig(
@@ -677,7 +678,12 @@ class PokerAssistant:
                 return {'error': 'Analysis failed'}
             
             # Make a decision
-            decision = self.neural_network.predict_action(game_state, 1)  # Assume player position 1
+            # decision = self.neural_network.predict_action(game_state, 1)  # Assume player position 1
+            
+            adapter = RLCardAdapter(model_path='models/poker_model.pt')
+
+            # Use it to predict actions during gameplay
+            decision = adapter.predict_action(game_state, 1)
             
             return {
                 'game_state': game_state,

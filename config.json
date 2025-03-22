@@ -3,7 +3,7 @@
   "screenshot_dir": "poker_data/screenshots",
   "game_state_dir": "poker_data/game_states",
   "training_data_dir": "poker_data/training",
-  "model_path": "models/best_model.pt",
+  "model_path": "models/poker_model.pt",
   "model_save_path": "models/model.pt",
   "auto_play": false,
   "confidence_threshold": 0.7,
