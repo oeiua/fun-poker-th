@@ -1,28 +1,24 @@
 # Core dependencies
-numpy>=1.19.0
-opencv-python>=4.5.0
-Pillow>=8.0.0
+numpy>=1.19.5
+opencv-python>=4.5.1
+PyQt5>=5.15.4
+easyocr>=1.4.1
+Pillow>=8.2.0
 
-# Neural network and machine learning
-tensorflow>=2.5.0
+# Windows-specific dependencies (for screen capture)
+pywin32>=300;platform_system=="Windows"
+pynput>=1.7.6
+
+# Optional dependencies for enhanced functionality
+matplotlib>=3.4.2
+pandas>=1.2.4
+scipy>=1.6.3
+scikit-learn>=0.24.2
 torch>=1.9.0
 torchvision>=0.10.0
 
-# Screen capture and UI
-pyautogui>=0.9.50
-# tkinter is part of the standard Python library (no pip installation needed)
-pywin32>=300; platform_system=="Windows"  # Windows-specific for window capture
-
-# Utilities
-pandas>=1.3.0
-matplotlib>=3.4.0
-pathlib>=1.0.1
-python-dateutil>=2.8.1
-pytz>=2021.1
-requests>=2.25.0
-# logging is part of the standard Python library
-
-# For potential development
-pytest>=6.2.0
+# Development dependencies
+pytest>=6.2.5
 black>=21.5b2
-flake8>=3.9.0
+flake8>=3.9.2
+mypy>=0.812
